@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#10141d" />
+    <meta
+      name="description"
+      content="银灰塔作战板：拖动干员到明日方舟主线关卡，记录一次性干员消耗与通关进度。"
+    />
+    <title>银灰塔作战板</title>
+    <link rel="stylesheet" href="./styles.css?v=3" />
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <header class="topbar">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 46 46" aria-hidden="true">
+          <path d="M23 2 43 13.5v19L23 44 3 32.5v-19L23 2Z" fill="none" />
+          <path d="m12 28 7-13 4 7 4-7 7 13-11 7-11-7Z" />
+        </svg>
+        <div>
+          <p class="eyebrow">RHODES ISLAND / PERSONAL OPERATION</p>
+          <h1>银灰塔作战板</h1>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span class="save-state" id="saveState"><i></i> 已自动保存</span>
+        <button class="ghost-button" id="undoButton" type="button" disabled>撤销</button>
+        <button class="ghost-button" id="exportButton" type="button">导出记录</button>
+        <label class="ghost-button file-button">
+          导入记录
+          <input id="importInput" type="file" accept="application/json" />
+        </label>
+        <button class="danger-button" id="resetButton" type="button">重置</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="operator-panel" aria-label="干员池">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">OPERATOR POOL</p>
+            <h2>可用干员</h2>
+          </div>
+          <span class="pool-count" id="poolCount">434</span>
+        </div>
+
+        <div class="search-box">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m16 16 5 5"></path></svg>
+          <input id="operatorSearch" type="search" placeholder="搜索干员" autocomplete="off" />
+        </div>
+
+        <div class="segmented" id="availabilityFilter" aria-label="干员状态筛选">
+          <button type="button" data-filter="available" class="active">可用</button>
+          <button type="button" data-filter="spent">已用</button>
+          <button type="button" data-filter="all">全部</button>
+        </div>
+
+        <div class="profession-tabs" id="professionTabs" aria-label="职业筛选"></div>
+
+        <p class="interaction-hint" id="interactionHint">点干员可选中编队，点“技能”可直达 PRTS；也可以拖动到右侧关卡。</p>
+        <div class="operator-list" id="operatorList"></div>
+      </aside>
+
+      <section class="mission-panel">
+        <div class="mission-head">
+          <div>
+            <p class="section-kicker">MAIN THEME / EPISODE 00—17</p>
+            <h2>主线行动</h2>
+            <p class="mission-copy">常规战斗关与绝境作战 H 关。拖入干员即计为本次挑战已使用。</p>
+          </div>
+          <div class="stage-search search-box">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m16 16 5 5"></path></svg>
+            <input id="stageSearch" type="search" placeholder="搜索关卡，如 17-18" autocomplete="off" />
+          </div>
+        </div>
+
+        <div class="chapter-strip" id="chapterStrip" aria-label="章节选择"></div>
+
+        <div class="stage-toolbar">
+          <div class="segmented" id="stageFilter" aria-label="关卡状态筛选">
+            <button type="button" data-filter="all" class="active">全部</button>
+            <button type="button" data-filter="planned">已编队</button>
+            <button type="button" data-filter="cleared">已通关</button>
+            <button type="button" data-filter="empty">未安排</button>
+          </div>
+          <span id="stageCount">321 个作战关卡</span>
+        </div>
+
+        <div class="selected-banner" id="selectedBanner" hidden>
+          <span>已选干员：<strong id="selectedOperatorName"></strong></span>
+          <button type="button" id="clearSelection">取消选择</button>
+        </div>
+
+        <div class="chapter-content" id="chapterContent"></div>
+      </section>
+
+      <aside class="status-panel" aria-label="挑战概况">
+        <section class="rule-card">
+          <p class="section-kicker">TOWER PROTOCOL</p>
+          <h2>挑战规则</h2>
+          <div class="rule-line">
+            <span class="rule-index">01</span>
+            <p>每名干员在整座塔中只能使用一次。</p>
+          </div>
+          <div class="rule-line silver-rule">
+            <span class="rule-index">∞</span>
+            <p><strong>银灰</strong>默认编入每一关且不可移除；凛御银灰仍按独立干员单次计算。</p>
+          </div>
+          <div class="rule-line">
+            <span class="rule-index">02</span>
+            <p>从关卡移除或拖到别关，会自动归还一次性干员。</p>
+          </div>
+        </section>
+
+        <section class="stats-card">
+          <div class="stat-block">
+            <span>剩余干员</span>
+            <strong id="availableStat">434</strong>
+          </div>
+          <div class="stat-block">
+            <span>已消耗</span>
+            <strong id="spentStat">0</strong>
+          </div>
+          <div class="stat-block">
+            <span>已编队关卡</span>
+            <strong id="plannedStat">0</strong>
+          </div>
+          <div class="stat-block silver-stat">
+            <span>银灰覆盖关卡</span>
+            <strong id="silverashStat">0</strong>
+          </div>
+        </section>
+
+        <section class="legend-card">
+          <p class="section-kicker">PROFESSION</p>
+          <h3>职业图例</h3>
+          <div id="professionLegend" class="profession-legend"></div>
+        </section>
+
+        <section class="reference-card">
+          <p class="section-kicker">REFERENCE</p>
+          <p>玩法参考巅峰计划《巅峰之塔#11》，关卡范围截至第 17 章。</p>
+          <a href="https://www.bilibili.com/video/BV1owgY6jEfk/" target="_blank" rel="noreferrer">查看参考视频 ↗</a>
+        </section>
+      </aside>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="./data.js?v=3"></script>
+    <script src="./app.js?v=3"></script>
+  </body>
+</html>
