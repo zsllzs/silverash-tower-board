@@ -1,7 +1,10 @@
 (() => {
   const DATA = window.SILVERASH_DATA;
   const STORAGE_KEY = "silverash-tower-board-v1";
-  const SHARED_BLOB_ENDPOINT = "https://superjsonblob.com/api/jsonBlob";
+  // The public page is static, so rooms use a tiny public key-value store.
+  // The app key is not a secret; the room id is the access link users share.
+  const SHARED_API_BASE = "https://keyvalue.immanuel.co/api/KeyVal";
+  const SHARED_APP_KEY = "z1dychd6";
   const CLIENT_ID_KEY = "silverash-tower-client-id";
   const clientId = localStorage.getItem(CLIENT_ID_KEY) || (() => {
     const id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -115,15 +118,64 @@
     return url.toString();
   }
 
-  function sharedPayload() {
-    return {
-      app: "silverash-tower-board",
-      version: 1,
-      clientId,
-      revision: Number(state.revision || 0),
-      updatedAt: state.updatedAt || new Date().toISOString(),
-      state,
-    };
+  function partitionObject(value) {
+    const entries = Object.entries(value || {});
+    const chunks = [];
+    let current = {};
+    for (const [key, item] of entries) {
+      const candidate = { ...current, [key]: item };
+      if (Object.keys(current).length && JSON.stringify(candidate).length > 860) {
+        chunks.push(current);
+        current = { [key]: item };
+      } else {
+        current = candidate;
+      }
+    }
+    chunks.push(current);
+    return chunks;
+  }
+
+  function roomKey(suffix) {
+    return `${roomId}:${suffix}`;
+  }
+
+  function roomParts(nextState = state) {
+    const parts = [];
+    for (const [section, value] of Object.entries({
+      assignments: nextState.assignments,
+      cleared: nextState.cleared,
+      notes: nextState.notes,
+    })) {
+      partitionObject(value).forEach((chunk, index) => {
+        parts.push({ key: roomKey(`${section[0]}${index}`), section, chunk });
+      });
+    }
+    return parts;
+  }
+
+  function extractXmlValue(text) {
+    if (!text.trim().startsWith("<")) return text;
+    try {
+      return new DOMParser().parseFromString(text, "application/xml").documentElement.textContent || "";
+    } catch {
+      return text.replace(/^<string[^>]*>/i, "").replace(/<\/string>\s*$/i, "");
+    }
+  }
+
+  async function writeRoomValue(key, value) {
+    const response = await fetch(`${SHARED_API_BASE}/UpdateValue/${SHARED_APP_KEY}/${encodeURIComponent(key)}/${encodeURIComponent(value)}`, {
+      method: "POST",
+      headers: { Accept: "text/plain" },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  }
+
+  async function readRoomValue(key) {
+    const response = await fetch(`${SHARED_API_BASE}/GetValue/${SHARED_APP_KEY}/${encodeURIComponent(key)}`, { headers: { Accept: "text/plain" } });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const value = extractXmlValue(await response.text());
+    if (!value || value === "null") throw new Error("missing room");
+    return value;
   }
 
   function queueSharedSync() {
@@ -135,15 +187,18 @@
   async function pushSharedState() {
     if (!roomId || syncInFlight) return;
     syncInFlight = true;
-    const payload = sharedPayload();
-    lastPushedAt = payload.updatedAt;
+    const pushedAt = state.updatedAt;
+    lastPushedAt = pushedAt;
     try {
-      const response = await fetch(`${SHARED_BLOB_ENDPOINT}/${encodeURIComponent(roomId)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const parts = roomParts(state);
+      await Promise.all(parts.map((part) => writeRoomValue(part.key, JSON.stringify(part.chunk))));
+      await writeRoomValue(roomKey("meta"), JSON.stringify({
+        app: "silverash-tower-board",
+        version: 1,
+        revision: Number(state.revision || 0),
+        updatedAt: state.updatedAt || new Date().toISOString(),
+        parts: parts.map(({ key, section }) => ({ key, section })),
+      }));
       setCollabStatus("协作房间 · 已同步", "ready");
     } catch {
       setCollabStatus("协作房间 · 同步失败，请检查网络", "error");
@@ -158,16 +213,18 @@
     if (!roomId) return;
     if (showLoading) setCollabStatus("协作房间 · 正在读取", "pending");
     try {
-      const response = await fetch(`${SHARED_BLOB_ENDPOINT}/${encodeURIComponent(roomId)}`, { headers: { Accept: "application/json" } });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = await response.json();
-      const remoteState = payload.state || payload;
-      if (!remoteState || typeof remoteState !== "object" || !remoteState.assignments) throw new Error("invalid payload");
-      const remoteUpdatedAt = payload.updatedAt || remoteState.updatedAt || null;
+      const meta = JSON.parse(await readRoomValue(roomKey("meta")));
+      if (meta.app !== "silverash-tower-board" || !Array.isArray(meta.parts)) throw new Error("invalid room");
+      const remoteState = defaultState();
+      const values = await Promise.all(meta.parts.map(async ({ key, section }) => ({ section, chunk: JSON.parse(await readRoomValue(key)) })));
+      for (const { section, chunk } of values) Object.assign(remoteState[section], chunk);
+      remoteState.updatedAt = meta.updatedAt || null;
+      remoteState.revision = meta.revision || 0;
+      const remoteUpdatedAt = meta.updatedAt || remoteState.updatedAt || null;
       const localTime = state.updatedAt ? Date.parse(state.updatedAt) : 0;
       const remoteTime = remoteUpdatedAt ? Date.parse(remoteUpdatedAt) : 0;
-      if (remoteTime > localTime || (payload.revision || 0) > (state.revision || 0)) {
-        state = { ...defaultState(), ...remoteState, updatedAt: remoteUpdatedAt, revision: payload.revision || remoteState.revision || 0 };
+      if (remoteTime > localTime || (meta.revision || 0) > (state.revision || 0)) {
+        state = remoteState;
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         history = [];
         renderAll();
@@ -196,20 +253,11 @@
     if (!state.updatedAt) saveState({ sync: false });
     setCollabStatus("正在创建协作房间…", "pending");
     try {
-      const payload = { ...sharedPayload(), revision: Math.max(1, Number(state.revision || 0)) };
-      const response = await fetch(SHARED_BLOB_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const result = await response.json().catch(() => ({}));
-      const location = response.headers.get("Location") || result.location || (result.id ? `${SHARED_BLOB_ENDPOINT}/${result.id}` : "");
-      roomId = normalizeRoomId(location);
-      if (!roomId) throw new Error("missing room id");
-      state.revision = payload.revision;
+      roomId = `at-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      state.revision = Math.max(1, Number(state.revision || 0));
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       window.history.replaceState({}, "", roomUrl());
+      await pushSharedState();
       startRoom();
       showToast("协作房间已创建，复制链接发给队友即可");
     } catch {
