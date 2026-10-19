@@ -136,7 +136,7 @@
   }
 
   function roomKey(suffix) {
-    return `${roomId}:${suffix}`;
+    return `${roomId}-${suffix}`;
   }
 
   function roomParts(nextState = state) {
