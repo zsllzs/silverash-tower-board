@@ -1,10 +1,6 @@
 (() => {
   const DATA = window.SILVERASH_DATA;
   const STORAGE_KEY = "silverash-tower-board-v1";
-  // The public page is static, so rooms use a tiny public key-value store.
-  // The app key is not a secret; the room id is the access link users share.
-  const SHARED_API_BASE = "https://keyvalue.immanuel.co/api/KeyVal";
-  const SHARED_APP_KEY = "z1dychd6";
   const CLIENT_ID_KEY = "silverash-tower-client-id";
   const clientId = localStorage.getItem(CLIENT_ID_KEY) || (() => {
     const id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -45,6 +41,11 @@
   let pollTimer = null;
   let syncInFlight = false;
   let lastPushedAt = null;
+  let sharedDoc = null;
+  let sharedMap = null;
+  let sharedProvider = null;
+  let sharedReady = null;
+  let remoteApplying = false;
 
   const elements = {
     operatorList: document.querySelector("#operatorList"),
@@ -118,126 +119,64 @@
     return url.toString();
   }
 
-  function partitionObject(value) {
-    const entries = Object.entries(value || {});
-    const chunks = [];
-    let current = {};
-    for (const [key, item] of entries) {
-      const candidate = { ...current, [key]: item };
-      if (Object.keys(current).length && JSON.stringify(candidate).length > 860) {
-        chunks.push(current);
-        current = { [key]: item };
-      } else {
-        current = candidate;
-      }
-    }
-    chunks.push(current);
-    return chunks;
-  }
-
-  function roomKey(suffix) {
-    return `${roomId}-${suffix}`;
-  }
-
-  function roomParts(nextState = state) {
-    const parts = [];
-    for (const [section, value] of Object.entries({
-      assignments: nextState.assignments,
-      cleared: nextState.cleared,
-      notes: nextState.notes,
-    })) {
-      partitionObject(value).forEach((chunk, index) => {
-        parts.push({ key: roomKey(`${section[0]}${index}`), section, chunk });
-      });
-    }
-    return parts;
-  }
-
-  function extractXmlValue(text) {
-    if (!text.trim().startsWith("<")) return text;
-    try {
-      return new DOMParser().parseFromString(text, "application/xml").documentElement.textContent || "";
-    } catch {
-      return text.replace(/^<string[^>]*>/i, "").replace(/<\/string>\s*$/i, "");
-    }
-  }
-
-  async function writeRoomValue(key, value) {
-    const response = await fetch(`${SHARED_API_BASE}/UpdateValue/${SHARED_APP_KEY}/${encodeURIComponent(key)}/${encodeURIComponent(value)}`, {
-      method: "POST",
-      headers: { Accept: "text/plain" },
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  }
-
-  async function readRoomValue(key) {
-    const response = await fetch(`${SHARED_API_BASE}/GetValue/${SHARED_APP_KEY}/${encodeURIComponent(key)}`, { headers: { Accept: "text/plain" } });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const value = extractXmlValue(await response.text());
-    if (!value || value === "null") throw new Error("missing room");
-    return value;
-  }
-
   function queueSharedSync() {
+    if (!roomId || !sharedMap || remoteApplying) return;
     clearTimeout(syncTimer);
-    setCollabStatus("协作房间 · 等待同步", "pending");
-    syncTimer = setTimeout(pushSharedState, 500);
-  }
-
-  async function pushSharedState() {
-    if (!roomId || syncInFlight) return;
-    syncInFlight = true;
-    const pushedAt = state.updatedAt;
-    lastPushedAt = pushedAt;
-    try {
-      const parts = roomParts(state);
-      await Promise.all(parts.map((part) => writeRoomValue(part.key, JSON.stringify(part.chunk))));
-      await writeRoomValue(roomKey("meta"), JSON.stringify({
-        app: "silverash-tower-board",
-        version: 1,
-        revision: Number(state.revision || 0),
-        updatedAt: state.updatedAt || new Date().toISOString(),
-        parts: parts.map(({ key, section }) => ({ key, section })),
-      }));
+    setCollabStatus("协作房间 · 正在同步", "pending");
+    syncTimer = setTimeout(() => {
+      sharedMap.set("state", JSON.parse(JSON.stringify(state)));
+      sharedMap.set("writer", clientId);
+      sharedMap.set("updatedAt", state.updatedAt || new Date().toISOString());
       setCollabStatus("协作房间 · 已同步", "ready");
-    } catch {
-      setCollabStatus("协作房间 · 同步失败，请检查网络", "error");
-      showToast("协作同步失败，记录仍保存在本机");
-    } finally {
-      syncInFlight = false;
-      if (state.updatedAt !== lastPushedAt) queueSharedSync();
-    }
+    }, 120);
   }
 
-  async function fetchSharedState(showLoading = false) {
+  function applyRemoteState(nextState) {
+    if (!nextState || typeof nextState !== "object" || !nextState.assignments) return;
+    const remoteTime = nextState.updatedAt ? Date.parse(nextState.updatedAt) : 0;
+    const localTime = state.updatedAt ? Date.parse(state.updatedAt) : 0;
+    if (remoteTime <= localTime && Number(nextState.revision || 0) <= Number(state.revision || 0)) return;
+    remoteApplying = true;
+    state = { ...defaultState(), ...nextState };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    history = [];
+    renderAll();
+    remoteApplying = false;
+    showToast("已同步协作者的最新记录");
+  }
+
+  async function initSharedRoom() {
     if (!roomId) return;
-    if (showLoading) setCollabStatus("协作房间 · 正在读取", "pending");
+    setCollabStatus("协作房间 · 正在连接", "pending");
     try {
-      const meta = JSON.parse(await readRoomValue(roomKey("meta")));
-      if (meta.app !== "silverash-tower-board" || !Array.isArray(meta.parts)) throw new Error("invalid room");
-      const remoteState = defaultState();
-      const values = await Promise.all(meta.parts.map(async ({ key, section }) => ({ section, chunk: JSON.parse(await readRoomValue(key)) })));
-      for (const { section, chunk } of values) Object.assign(remoteState[section], chunk);
-      remoteState.updatedAt = meta.updatedAt || null;
-      remoteState.revision = meta.revision || 0;
-      const remoteUpdatedAt = meta.updatedAt || remoteState.updatedAt || null;
-      const localTime = state.updatedAt ? Date.parse(state.updatedAt) : 0;
-      const remoteTime = remoteUpdatedAt ? Date.parse(remoteUpdatedAt) : 0;
-      if (remoteTime > localTime || (meta.revision || 0) > (state.revision || 0)) {
-        state = remoteState;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-        history = [];
-        renderAll();
-        showToast("已同步协作者的最新记录");
-      }
-      setCollabStatus("协作房间 · 已连接", "ready");
+      const [{ Doc }, { WebsocketProvider }] = await Promise.all([
+        import("https://esm.sh/yjs@13.6.27"),
+        import("https://esm.sh/y-websocket@2.0.4"),
+      ]);
+      sharedDoc = new Doc();
+      sharedMap = sharedDoc.getMap("silverash-tower-board");
+      sharedMap.observe(() => {
+        if (sharedMap.get("writer") !== clientId) applyRemoteState(sharedMap.get("state"));
+      });
+      sharedProvider = new WebsocketProvider("wss://demos.yjs.dev/ws", `silverash-tower-${roomId}`, sharedDoc);
+      sharedProvider.on("status", ({ status }) => setCollabStatus(status === "connected" ? "协作房间 · 已连接" : "协作房间 · 正在重连", status === "connected" ? "ready" : "pending"));
+      sharedProvider.on("sync", (synced) => {
+        if (!synced) return;
+        if (sharedMap.get("state")) applyRemoteState(sharedMap.get("state"));
+        else queueSharedSync();
+      });
     } catch {
-      setCollabStatus("协作房间 · 房间不存在或暂时不可用", "error");
+      setCollabStatus("协作房间 · 连接失败，请重试", "error");
+      showToast("协作服务暂时不可用，记录仍保存在本机");
     }
   }
 
   function startRoom() {
     clearInterval(pollTimer);
+    if (sharedProvider) sharedProvider.destroy();
+    sharedDoc = null;
+    sharedMap = null;
+    sharedProvider = null;
     if (!roomId) {
       elements.copyRoomButton.disabled = true;
       setCollabStatus("本机记录 · 还没有共享");
@@ -245,8 +184,7 @@
     }
     elements.copyRoomButton.disabled = false;
     elements.roomInput.value = roomId;
-    fetchSharedState(true);
-    pollTimer = setInterval(() => fetchSharedState(false), 3000);
+    sharedReady = initSharedRoom();
   }
 
   async function createRoom() {
@@ -257,7 +195,6 @@
       state.revision = Math.max(1, Number(state.revision || 0));
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       window.history.replaceState({}, "", roomUrl());
-      await pushSharedState();
       startRoom();
       showToast("协作房间已创建，复制链接发给队友即可");
     } catch {
