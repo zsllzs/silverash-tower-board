@@ -9,7 +9,7 @@
       content="银灰塔作战板：拖动干员到明日方舟主线关卡，记录一次性干员消耗与通关进度。"
     />
     <title>银灰塔作战板</title>
-    <link rel="stylesheet" href="./styles.css?v=3" />
+    <link rel="stylesheet" href="./styles.css?v=4" />
   </head>
   <body>
     <div class="noise" aria-hidden="true"></div>
@@ -35,6 +35,20 @@
         <button class="danger-button" id="resetButton" type="button">重置</button>
       </div>
     </header>
+
+    <section class="collab-bar" aria-label="多人协作">
+      <div class="collab-intro">
+        <span class="section-kicker">CO-OP ROOM</span>
+        <strong>多人协作房间</strong>
+        <span id="collabStatus">本机记录 · 还没有共享</span>
+      </div>
+      <div class="collab-actions">
+        <button class="ghost-button" id="createRoomButton" type="button">创建协作房间</button>
+        <button class="ghost-button" id="copyRoomButton" type="button" disabled>复制房间链接</button>
+        <input id="roomInput" type="text" placeholder="粘贴房间链接或房间号" autocomplete="off" />
+        <button class="ghost-button" id="joinRoomButton" type="button">加入</button>
+      </div>
+    </section>
 
     <main class="workspace">
       <aside class="operator-panel" aria-label="干员池">
@@ -149,6 +163,6 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script src="./data.js?v=3"></script>
-    <script src="./app.js?v=3"></script>
+    <script src="./app.js?v=4"></script>
   </body>
 </html>

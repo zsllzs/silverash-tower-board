@@ -1,6 +1,13 @@
 (() => {
   const DATA = window.SILVERASH_DATA;
   const STORAGE_KEY = "silverash-tower-board-v1";
+  const SHARED_BLOB_ENDPOINT = "https://superjsonblob.com/api/jsonBlob";
+  const CLIENT_ID_KEY = "silverash-tower-client-id";
+  const clientId = localStorage.getItem(CLIENT_ID_KEY) || (() => {
+    const id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    localStorage.setItem(CLIENT_ID_KEY, id);
+    return id;
+  })();
   const professions = ["先锋", "近卫", "重装", "狙击", "术师", "医疗", "辅助", "特种"];
   const colors = {
     先锋: "#50c9b5", 近卫: "#ef7b67", 重装: "#d8a546", 狙击: "#7ab8ee",
@@ -18,6 +25,7 @@
     cleared: {},
     notes: {},
     updatedAt: null,
+    revision: 0,
   });
 
   let state = loadState();
@@ -29,6 +37,11 @@
   let selectedOperatorId = null;
   let dragged = null;
   let toastTimer = null;
+  let roomId = new URLSearchParams(window.location.search).get("room");
+  let syncTimer = null;
+  let pollTimer = null;
+  let syncInFlight = false;
+  let lastPushedAt = null;
 
   const elements = {
     operatorList: document.querySelector("#operatorList"),
@@ -55,6 +68,11 @@
     importInput: document.querySelector("#importInput"),
     resetButton: document.querySelector("#resetButton"),
     toast: document.querySelector("#toast"),
+    collabStatus: document.querySelector("#collabStatus"),
+    createRoomButton: document.querySelector("#createRoomButton"),
+    copyRoomButton: document.querySelector("#copyRoomButton"),
+    roomInput: document.querySelector("#roomInput"),
+    joinRoomButton: document.querySelector("#joinRoomButton"),
   };
 
   function loadState() {
@@ -66,10 +84,146 @@
     }
   }
 
-  function saveState() {
+  function setCollabStatus(message, tone = "") {
+    if (!elements.collabStatus) return;
+    elements.collabStatus.textContent = message;
+    elements.collabStatus.dataset.tone = tone;
+  }
+
+  function saveState({ sync = true } = {}) {
     state.updatedAt = new Date().toISOString();
+    if (roomId && sync) state.revision = Number(state.revision || 0) + 1;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     elements.saveState.innerHTML = "<i></i> 已自动保存";
+    if (roomId && sync) queueSharedSync();
+  }
+
+  function normalizeRoomId(value) {
+    const input = String(value || "").trim();
+    if (!input) return "";
+    try {
+      const url = new URL(input);
+      return url.searchParams.get("room") || url.pathname.split("/").filter(Boolean).pop() || "";
+    } catch {
+      return input.replace(/^.*room=/, "").split(/[?#&]/)[0];
+    }
+  }
+
+  function roomUrl() {
+    const url = new URL(window.location.href);
+    url.searchParams.set("room", roomId);
+    return url.toString();
+  }
+
+  function sharedPayload() {
+    return {
+      app: "silverash-tower-board",
+      version: 1,
+      clientId,
+      revision: Number(state.revision || 0),
+      updatedAt: state.updatedAt || new Date().toISOString(),
+      state,
+    };
+  }
+
+  function queueSharedSync() {
+    clearTimeout(syncTimer);
+    setCollabStatus("协作房间 · 等待同步", "pending");
+    syncTimer = setTimeout(pushSharedState, 500);
+  }
+
+  async function pushSharedState() {
+    if (!roomId || syncInFlight) return;
+    syncInFlight = true;
+    const payload = sharedPayload();
+    lastPushedAt = payload.updatedAt;
+    try {
+      const response = await fetch(`${SHARED_BLOB_ENDPOINT}/${encodeURIComponent(roomId)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setCollabStatus("协作房间 · 已同步", "ready");
+    } catch {
+      setCollabStatus("协作房间 · 同步失败，请检查网络", "error");
+      showToast("协作同步失败，记录仍保存在本机");
+    } finally {
+      syncInFlight = false;
+      if (state.updatedAt !== lastPushedAt) queueSharedSync();
+    }
+  }
+
+  async function fetchSharedState(showLoading = false) {
+    if (!roomId) return;
+    if (showLoading) setCollabStatus("协作房间 · 正在读取", "pending");
+    try {
+      const response = await fetch(`${SHARED_BLOB_ENDPOINT}/${encodeURIComponent(roomId)}`, { headers: { Accept: "application/json" } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json();
+      const remoteState = payload.state || payload;
+      if (!remoteState || typeof remoteState !== "object" || !remoteState.assignments) throw new Error("invalid payload");
+      const remoteUpdatedAt = payload.updatedAt || remoteState.updatedAt || null;
+      const localTime = state.updatedAt ? Date.parse(state.updatedAt) : 0;
+      const remoteTime = remoteUpdatedAt ? Date.parse(remoteUpdatedAt) : 0;
+      if (remoteTime > localTime || (payload.revision || 0) > (state.revision || 0)) {
+        state = { ...defaultState(), ...remoteState, updatedAt: remoteUpdatedAt, revision: payload.revision || remoteState.revision || 0 };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        history = [];
+        renderAll();
+        showToast("已同步协作者的最新记录");
+      }
+      setCollabStatus("协作房间 · 已连接", "ready");
+    } catch {
+      setCollabStatus("协作房间 · 房间不存在或暂时不可用", "error");
+    }
+  }
+
+  function startRoom() {
+    clearInterval(pollTimer);
+    if (!roomId) {
+      elements.copyRoomButton.disabled = true;
+      setCollabStatus("本机记录 · 还没有共享");
+      return;
+    }
+    elements.copyRoomButton.disabled = false;
+    elements.roomInput.value = roomId;
+    fetchSharedState(true);
+    pollTimer = setInterval(() => fetchSharedState(false), 3000);
+  }
+
+  async function createRoom() {
+    if (!state.updatedAt) saveState({ sync: false });
+    setCollabStatus("正在创建协作房间…", "pending");
+    try {
+      const payload = { ...sharedPayload(), revision: Math.max(1, Number(state.revision || 0)) };
+      const response = await fetch(SHARED_BLOB_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = await response.json().catch(() => ({}));
+      const location = response.headers.get("Location") || result.location || (result.id ? `${SHARED_BLOB_ENDPOINT}/${result.id}` : "");
+      roomId = normalizeRoomId(location);
+      if (!roomId) throw new Error("missing room id");
+      state.revision = payload.revision;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      window.history.replaceState({}, "", roomUrl());
+      startRoom();
+      showToast("协作房间已创建，复制链接发给队友即可");
+    } catch {
+      setCollabStatus("创建失败，请稍后重试", "error");
+      showToast("暂时无法创建协作房间，请检查网络");
+    }
+  }
+
+  function joinRoom() {
+    const nextRoomId = normalizeRoomId(elements.roomInput.value);
+    if (!nextRoomId) return showToast("请粘贴有效的房间链接或房间号");
+    roomId = nextRoomId;
+    window.history.replaceState({}, "", roomUrl());
+    startRoom();
   }
 
   function snapshot() {
@@ -332,6 +486,26 @@
 
   elements.operatorSearch.addEventListener("input", renderOperators);
   elements.stageSearch.addEventListener("input", renderStages);
+  elements.createRoomButton.addEventListener("click", createRoom);
+  elements.joinRoomButton.addEventListener("click", joinRoom);
+  elements.roomInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") joinRoom();
+  });
+  elements.copyRoomButton.addEventListener("click", async () => {
+    if (!roomId) return;
+    const link = roomUrl();
+    try {
+      await navigator.clipboard.writeText(link);
+    } catch {
+      const helper = document.createElement("textarea");
+      helper.value = link;
+      document.body.appendChild(helper);
+      helper.select();
+      document.execCommand("copy");
+      helper.remove();
+    }
+    showToast("房间链接已复制");
+  });
 
   elements.professionTabs.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-profession]");
@@ -507,4 +681,5 @@
   });
 
   renderAll();
+  startRoom();
 })();
