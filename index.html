@@ -62,6 +62,7 @@
           <button class="ghost-button" id="joinRoomButton" type="button">加入房间</button>
           <button class="ghost-button" id="leaveRoomButton" type="button" hidden>退出房间</button>
           <button class="ghost-button" id="syncRoomButton" type="button" hidden disabled>立即同步</button>
+          <button class="ghost-button" id="restoreLegacyButton" type="button" hidden>合并旧本机记录</button>
           <button class="ghost-button" id="copyRoomButton" type="button" disabled>复制邀请链接</button>
         </div>
         <p class="room-hint" id="roomHint">队友输入相同房间名和密码即可加入；邀请链接不含密码，请单独告知。协作记录建议定期导出备份。</p>
@@ -187,7 +188,7 @@
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script src="./data.js?v=3"></script>
     <script src="./room-config.js?v=1"></script>
-    <script src="./app.js?v=11"></script>
+    <script src="./app.js?v=12"></script>
   </body>
 </html>
 
