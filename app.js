@@ -1020,6 +1020,7 @@
         const matchesQuery = !query || stage.code.toLowerCase().includes(query) || chapter.title.toLowerCase().includes(query);
         const matchesFilter = stageFilter === "all"
           || (stageFilter === "cleared" && cleared)
+          || (stageFilter === "uncleared" && !cleared)
           || (stageFilter === "empty" && !planned);
         return matchesQuery && matchesFilter;
       });
@@ -1062,7 +1063,7 @@
           <span class="stage-type ${stage.type === "绝境" ? "hard" : ""}">${stage.type}</span>
           <div class="stage-controls">
             <button type="button" class="note-toggle ${hasNote ? "active" : ""}" title="备注" aria-label="编辑 ${stage.id} 备注">✎</button>
-            <button type="button" class="clear-toggle ${cleared ? "active" : ""}" title="点击切换通关状态" aria-label="${stage.id}：${cleared ? "已通关，点击设为未通关" : "未通关，点击设为已通关"}" aria-pressed="${cleared}">${cleared ? "✓ 已通关" : "未通关"}</button>
+            <button type="button" class="clear-toggle ${cleared ? "active" : ""}" title="${cleared ? "取消通关" : "标记通关"}" aria-label="${cleared ? "取消通关" : "标记通关"}">✓</button>
           </div>
         </div>
         <div class="stage-body">
@@ -1236,8 +1237,17 @@
   elements.stageFilter.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-filter]");
     if (!button) return;
-    stageFilter = button.dataset.filter;
-    elements.stageFilter.querySelectorAll("button").forEach((item) => item.classList.toggle("active", item === button));
+    stageFilter = button.dataset.filter === "toggle-clear"
+      ? stageFilter === "cleared" ? "uncleared" : "cleared"
+      : button.dataset.filter;
+    elements.stageFilter.querySelectorAll("button").forEach((item) => {
+      item.classList.toggle("active", item.dataset.filter === "toggle-clear"
+        ? stageFilter === "cleared" || stageFilter === "uncleared"
+        : item.dataset.filter === stageFilter);
+    });
+    const clearFilter = elements.stageFilter.querySelector('[data-filter="toggle-clear"]');
+    clearFilter.textContent = stageFilter === "uncleared" ? "未通关" : "已通关";
+    clearFilter.setAttribute("aria-label", `${clearFilter.textContent}关卡，再点切换`);
     renderStages();
   });
 
