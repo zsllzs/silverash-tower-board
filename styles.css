@@ -155,7 +155,7 @@ body.room-connecting .top-actions { opacity: .45; pointer-events: none; cursor: 
 .operator-panel > .interaction-hint { flex: 0 0 auto; }
 
 .profession-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; overflow: visible; padding: 11px 0 7px; }
-.rarity-tabs { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+.rarity-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin-top: 9px; }
 .rarity-tabs button { min-height: 27px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; background: #0c1119; color: var(--muted); font-size: 11px; cursor: pointer; }
 .rarity-tabs button.active { color: var(--yellow); border-color: var(--yellow); background: rgba(245,200,66,.09); }
 .profession-tabs button { min-width: 0; border: 1px solid var(--line); background: transparent; color: var(--muted); padding: 6px 4px; border-radius: 5px; font-size: 11px; cursor: pointer; white-space: nowrap; }
