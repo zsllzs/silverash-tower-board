@@ -68,7 +68,17 @@ button { color: inherit; }
 .collab-intro strong { color: #eafcff; font-size: 15px; }
 .collab-intro > span:last-child { color: var(--muted); font-size: 11px; }
 .collab-actions { display: grid; justify-items: end; gap: 8px; width: min(100%, 660px); }
-.room-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; width: 100%; }
+.room-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; width: 100%; }
+.room-dashboard { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(0, 2fr); gap: 14px; margin: 0 22px 18px; padding: 14px 16px; border: 1px solid var(--line); background: var(--surface); }
+.room-dashboard[hidden] { display: none; }
+.room-dashboard strong { display: block; margin-bottom: 9px; color: var(--cyan); font-size: 13px; }
+.member-list { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 7px; color: var(--muted); font-size: 12px; }
+.member-chip { padding: 5px 9px; border: 1px solid var(--line); background: var(--surface-2); color: var(--text); border-radius: 99px; overflow-wrap: anywhere; }
+.member-chip.self { border-color: var(--cyan); }
+.event-list { max-height: 230px; overflow-y: auto; color: var(--muted); font-size: 12px; }
+.event-day { margin: 12px 0 5px; color: var(--silver); font-weight: 700; }
+.event-row { display: grid; grid-template-columns: 44px minmax(65px, auto) minmax(0, 1fr); gap: 8px; padding: 7px 0; border-top: 1px solid var(--line-soft); }
+.event-row span { overflow-wrap: anywhere; }
 .room-field { display: grid; gap: 5px; min-width: 0; color: #c4d4e2; font-size: 11px; }
 .room-field input { width: 100%; min-width: 0; border: 1px solid var(--line); background: rgba(8, 13, 21, .64); color: var(--text); padding: 9px 10px; font: inherit; font-size: 12px; outline: none; }
 .room-field input:focus { border-color: var(--cyan); box-shadow: 0 0 0 2px rgba(89, 211, 219, .12); }
@@ -289,6 +299,7 @@ body.room-connecting .top-actions { opacity: .45; pointer-events: none; cursor: 
   .collab-actions { justify-items: stretch; width: 100%; }
   .room-buttons { justify-content: flex-start; }
   .room-hint { text-align: left; }
+  .room-dashboard { grid-template-columns: 1fr; margin: 0 12px 14px; }
   .workspace { display: block; padding: 10px; }
   .operator-panel { position: relative; top: auto; height: min(620px, 70vh); min-height: 480px; margin-bottom: 12px; }
   .profession-tabs { grid-template-columns: repeat(5, minmax(0, 1fr)); }
