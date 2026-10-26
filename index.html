@@ -9,7 +9,7 @@
       content="银灰塔作战板：拖动干员到明日方舟主线关卡，记录一次性干员消耗与通关进度。"
     />
     <title>银灰塔作战板</title>
-    <link rel="stylesheet" href="./styles.css?v=9" />
+    <link rel="stylesheet" href="./styles.css?v=10" />
   </head>
   <body>
     <div class="noise" aria-hidden="true"></div>
@@ -71,7 +71,7 @@
 
     <section class="room-dashboard" id="roomDashboard" aria-label="房间动态" hidden>
       <div class="room-online"><strong>当前在线 <span id="onlineCount">0</span></strong><div id="onlineMembers" class="member-list">连接后显示</div></div>
-      <div class="room-activity"><strong>每日调整</strong><div id="roomEvents" class="event-list">还没有调整记录</div></div>
+      <div class="room-activity"><strong>每日通关与备注</strong><div id="roomEvents" class="event-list">还没有调整记录</div></div>
     </section>
 
     <main class="workspace">
@@ -93,6 +93,16 @@
           <button type="button" data-filter="available" class="active">可用</button>
           <button type="button" data-filter="spent">已用</button>
           <button type="button" data-filter="all">全部</button>
+        </div>
+
+        <div class="rarity-tabs" id="rarityTabs" aria-label="干员星级筛选">
+          <button type="button" data-rarity="all" class="active">全部星级</button>
+          <button type="button" data-rarity="6">6★</button>
+          <button type="button" data-rarity="5">5★</button>
+          <button type="button" data-rarity="4">4★</button>
+          <button type="button" data-rarity="3">3★</button>
+          <button type="button" data-rarity="2">2★</button>
+          <button type="button" data-rarity="1">1★</button>
         </div>
 
         <div class="profession-tabs" id="professionTabs" aria-label="职业筛选"></div>
@@ -119,7 +129,6 @@
         <div class="stage-toolbar">
           <div class="segmented" id="stageFilter" aria-label="关卡状态筛选">
             <button type="button" data-filter="all" class="active">全部</button>
-            <button type="button" data-filter="planned">已编队</button>
             <button type="button" data-filter="cleared">已通关</button>
             <button type="button" data-filter="empty">未安排</button>
           </div>
@@ -162,8 +171,8 @@
             <strong id="spentStat">0</strong>
           </div>
           <div class="stat-block">
-            <span>已编队关卡</span>
-            <strong id="plannedStat">0</strong>
+            <span>已通关关卡</span>
+            <strong id="clearedStat">0</strong>
           </div>
           <div class="stat-block silver-stat">
             <span>银灰覆盖关卡</span>
@@ -188,7 +197,7 @@
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script src="./data.js?v=3"></script>
     <script src="./room-config.js?v=1"></script>
-    <script src="./app.js?v=12"></script>
+    <script src="./app.js?v=13"></script>
   </body>
 </html>
 
