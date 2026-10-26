@@ -233,8 +233,7 @@ body.room-connecting .top-actions { opacity: .45; pointer-events: none; cursor: 
 .stage-type { padding: 2px 6px; border: 1px solid #445063; color: var(--muted); font-size: 9px; letter-spacing: .08em; }
 .stage-type.hard { color: #ff9ba3; border-color: rgba(255,95,109,.5); background: rgba(255,95,109,.08); }
 .stage-controls { margin-left: auto; display: flex; gap: 5px; }
-.stage-controls button { min-width: 27px; min-height: 27px; border: 1px solid var(--line); background: #0d121a; color: var(--muted); cursor: pointer; }
-.stage-controls .clear-toggle { width: auto; padding: 3px 8px; white-space: nowrap; font-size: 11px; }
+.stage-controls button { width: 27px; height: 27px; border: 1px solid var(--line); background: #0d121a; color: var(--muted); cursor: pointer; }
 .stage-controls button:hover, .stage-controls button.active { color: var(--green); border-color: var(--green); }
 .stage-body { min-height: 70px; padding: 8px; }
 .drop-copy { display: grid; place-items: center; min-height: 54px; border: 1px dashed #313d4f; color: #596575; font-size: 11px; }
