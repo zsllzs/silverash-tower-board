@@ -200,6 +200,7 @@ body.room-connecting .top-actions { opacity: .45; pointer-events: none; cursor: 
 .stage-toolbar .segmented { width: min(440px, 75%); }
 .stage-toolbar > span { color: var(--muted); font-size: 11px; }
 .selected-banner { display: flex; align-items: center; justify-content: space-between; margin: 12px 16px 0; padding: 9px 11px; border: 1px solid var(--cyan); background: rgba(33,199,217,.1); color: #caecf1; font-size: 12px; }
+.selected-banner[hidden] { display: none; }
 .selected-banner button { border: 0; background: transparent; color: var(--cyan); cursor: pointer; }
 
 .chapter-content { padding: 14px; }
