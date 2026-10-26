@@ -29,6 +29,7 @@
   let history = [];
   let selectedChapter = "17";
   let selectedProfession = "全部";
+  let selectedRarity = "all";
   let availabilityFilter = "available";
   let stageFilter = "all";
   let selectedOperatorId = null;
@@ -46,6 +47,7 @@
   let syncTimer = null;
   let pollTimer = null;
   let overviewTimer = null;
+  let noteSaveTimer = null;
   let syncInFlight = false;
   let pollInFlight = false;
   let lastRoomErrorAt = 0;
@@ -65,6 +67,7 @@
     operatorList: document.querySelector("#operatorList"),
     operatorSearch: document.querySelector("#operatorSearch"),
     professionTabs: document.querySelector("#professionTabs"),
+    rarityTabs: document.querySelector("#rarityTabs"),
     availabilityFilter: document.querySelector("#availabilityFilter"),
     chapterStrip: document.querySelector("#chapterStrip"),
     chapterContent: document.querySelector("#chapterContent"),
@@ -77,7 +80,7 @@
     stageCount: document.querySelector("#stageCount"),
     availableStat: document.querySelector("#availableStat"),
     spentStat: document.querySelector("#spentStat"),
-    plannedStat: document.querySelector("#plannedStat"),
+    clearedStat: document.querySelector("#clearedStat"),
     silverashStat: document.querySelector("#silverashStat"),
     professionLegend: document.querySelector("#professionLegend"),
     saveState: document.querySelector("#saveState"),
@@ -157,6 +160,13 @@
       }
       queueSharedSync();
     }
+  }
+
+  function flushNoteSave() {
+    if (!noteSaveTimer) return;
+    clearTimeout(noteSaveTimer);
+    noteSaveTimer = null;
+    saveState();
   }
 
   function isDurableRoom() {
@@ -257,19 +267,14 @@
 
   function summarizeChanges(before, after) {
     const lines = [];
-    for (const stageId of new Set([...Object.keys(before.assignments || {}), ...Object.keys(after.assignments || {}), ...Object.keys(before.cleared || {}), ...Object.keys(after.cleared || {}), ...Object.keys(before.notes || {}), ...Object.keys(after.notes || {})])) {
-      const previous = (before.assignments?.[stageId] || []).map((item) => item.operatorId);
-      const current = (after.assignments?.[stageId] || []).map((item) => item.operatorId);
-      const added = current.filter((id) => !previous.includes(id)).map((id) => operatorById.get(id)?.name || id);
-      const removed = previous.filter((id) => !current.includes(id)).map((id) => operatorById.get(id)?.name || id);
+    for (const stageId of new Set([...Object.keys(before.cleared || {}), ...Object.keys(after.cleared || {}), ...Object.keys(before.notes || {}), ...Object.keys(after.notes || {})])) {
       const changes = [];
-      if (added.length) changes.push(`加入 ${added.join("、")}`);
-      if (removed.length) changes.push(`移除 ${removed.join("、")}`);
-      if (Boolean(before.cleared?.[stageId]) !== Boolean(after.cleared?.[stageId])) changes.push(after.cleared?.[stageId] ? "标记通关" : "取消通关");
-      if ((before.notes?.[stageId] || "") !== (after.notes?.[stageId] || "")) changes.push("修改备注");
+      if (Boolean(before.cleared?.[stageId]) !== Boolean(after.cleared?.[stageId])) changes.push(after.cleared?.[stageId] ? "已通关" : "未通关");
+      if ((before.notes?.[stageId] || "") !== (after.notes?.[stageId] || "")
+          || Object.hasOwn(before.notes || {}, stageId) !== Object.hasOwn(after.notes || {}, stageId)) changes.push("备注有改动");
       if (changes.length) lines.push(`${stageId}：${changes.join("，")}`);
     }
-    return (lines.join("；") || "更新房间记录").slice(0, 400);
+    return lines.join("；").slice(0, 400);
   }
 
   function renderOverview(data) {
@@ -284,12 +289,30 @@
     }
     if (!members.length) elements.onlineMembers.textContent = "暂无在线成员";
     const events = Array.isArray(data.events) ? data.events : [];
-    elements.roomEvents.replaceChildren();
-    let previousDay = "";
+    const grouped = new Map();
     for (const event of events) {
       const when = new Date(event.created_at);
       if (Number.isNaN(when.getTime())) continue;
       const day = when.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
+      for (const part of String(event.summary || "").split("；")) {
+        const match = part.match(/^([^：]+)：(.+)$/);
+        if (!match) continue;
+        const stage = match[1].trim();
+        const detail = match[2];
+        const status = /未通关|取消通关/.test(detail) ? "未通关" : /已通关|标记通关/.test(detail) ? "已通关" : null;
+        const note = /备注/.test(detail);
+        if (!status && !note) continue;
+        const key = `${day}|${stage}`;
+        if (!grouped.has(key)) grouped.set(key, { day, stage, status: null, note: false });
+        const item = grouped.get(key);
+        item.status ||= status;
+        item.note ||= note;
+      }
+    }
+    elements.roomEvents.replaceChildren();
+    let previousDay = "";
+    for (const item of grouped.values()) {
+      const { day } = item;
       if (day !== previousDay) {
         const heading = document.createElement("div");
         heading.className = "event-day";
@@ -299,14 +322,10 @@
       }
       const row = document.createElement("div");
       row.className = "event-row";
-      for (const value of [when.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }), event.actor, event.summary]) {
-        const cell = document.createElement("span");
-        cell.textContent = value || "";
-        row.append(cell);
-      }
+      row.textContent = `${item.stage} · ${[item.status, item.note ? "备注有改动" : null].filter(Boolean).join(" · ")}`;
       elements.roomEvents.append(row);
     }
-    if (!events.length) elements.roomEvents.textContent = "还没有调整记录；新保存的改动会显示在这里。";
+    if (!grouped.size) elements.roomEvents.textContent = "还没有通关或备注调整。";
   }
 
   async function refreshOverview(generation) {
@@ -728,6 +747,7 @@
   }
 
   async function createRoom() {
+    flushNoteSave();
     const name = elements.roomInput.value.normalize("NFKC").trim();
     const password = elements.roomPasswordInput.value;
     if (name.length < 2 || name.length > 40 || /^https?:\/\//i.test(name)) return showToast("房间名请输入 2～40 个字");
@@ -759,6 +779,7 @@
   }
 
   async function joinRoom() {
+    flushNoteSave();
     const parsed = parseRoomInput(elements.roomInput.value);
     if (!parsed) return showToast("请输入房间名或邀请链接");
     if (parsed.name.length > 40) return showToast("房间名不能超过 40 个字");
@@ -787,6 +808,7 @@
   }
 
   function leaveRoom() {
+    flushNoteSave();
     roomId = null;
     roomName = "";
     roomNameKey = "";
@@ -815,6 +837,8 @@
   }
 
   function commit(message) {
+    clearTimeout(noteSaveTimer);
+    noteSaveTimer = null;
     saveState();
     renderAll();
     if (message) showToast(message);
@@ -916,8 +940,9 @@
       const available = isAvailable(operator);
       const matchesAvailability = availabilityFilter === "all" || (availabilityFilter === "available" ? available : !available);
       const matchesProfession = selectedProfession === "全部" || operator.profession === selectedProfession;
+      const matchesRarity = selectedRarity === "all" || operator.rarity === Number(selectedRarity);
       const matchesQuery = !query || operator.name.toLowerCase().includes(query);
-      return matchesAvailability && matchesProfession && matchesQuery;
+      return matchesAvailability && matchesProfession && matchesRarity && matchesQuery;
     });
 
     if (!filtered.length) {
@@ -994,7 +1019,6 @@
         const cleared = Boolean(state.cleared[stage.id]);
         const matchesQuery = !query || stage.code.toLowerCase().includes(query) || chapter.title.toLowerCase().includes(query);
         const matchesFilter = stageFilter === "all"
-          || (stageFilter === "planned" && planned)
           || (stageFilter === "cleared" && cleared)
           || (stageFilter === "empty" && !planned);
         return matchesQuery && matchesFilter;
@@ -1038,7 +1062,7 @@
           <span class="stage-type ${stage.type === "绝境" ? "hard" : ""}">${stage.type}</span>
           <div class="stage-controls">
             <button type="button" class="note-toggle ${hasNote ? "active" : ""}" title="备注" aria-label="编辑 ${stage.id} 备注">✎</button>
-            <button type="button" class="clear-toggle ${cleared ? "active" : ""}" title="${cleared ? "取消通关" : "标记通关"}" aria-label="${cleared ? "取消通关" : "标记通关"}">✓</button>
+            <button type="button" class="clear-toggle ${cleared ? "active" : ""}" title="点击切换通关状态" aria-label="${stage.id}：${cleared ? "已通关，点击设为未通关" : "未通关，点击设为已通关"}" aria-pressed="${cleared}">${cleared ? "✓ 已通关" : "未通关"}</button>
           </div>
         </div>
         <div class="stage-body">
@@ -1101,12 +1125,12 @@
   function renderStats() {
     const spent = DATA.operators.filter((operator) => !operator.repeatable && !isAvailable(operator)).length;
     const available = DATA.operators.length - spent;
-    const planned = DATA.chapters.flatMap((chapter) => chapter.stages).filter((stage) => assignmentList(stage.id).length).length;
+    const cleared = Object.values(state.cleared).filter(Boolean).length;
     const silverashCount = DATA.meta.stageCount;
     elements.poolCount.textContent = availabilityFilter === "available" ? available : DATA.operators.length;
     elements.availableStat.textContent = available;
     elements.spentStat.textContent = spent;
-    elements.plannedStat.textContent = planned;
+    elements.clearedStat.textContent = cleared;
     elements.silverashStat.textContent = silverashCount;
     elements.selectedBanner.hidden = !selectedOperatorId;
     elements.selectedOperatorName.textContent = selectedOperatorId ? operatorById.get(selectedOperatorId)?.name || "" : "";
@@ -1151,6 +1175,7 @@
     if (event.key === "Enter") joinRoom();
   });
   document.addEventListener("visibilitychange", () => {
+    if (document.hidden) flushNoteSave();
     if (!roomReady || !isDurableRoom()) return;
     const generation = roomGeneration;
     if (!document.hidden) {
@@ -1180,6 +1205,14 @@
     if (!button) return;
     selectedProfession = button.dataset.profession;
     renderProfessionControls();
+    renderOperators();
+  });
+
+  elements.rarityTabs.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-rarity]");
+    if (!button) return;
+    selectedRarity = button.dataset.rarity;
+    elements.rarityTabs.querySelectorAll("button").forEach((item) => item.classList.toggle("active", item === button));
     renderOperators();
   });
 
@@ -1310,7 +1343,14 @@
     if (!textarea) return;
     const stageId = textarea.closest(".stage-card").dataset.stageId;
     state.notes[stageId] = textarea.value;
-    saveState();
+    saveState({ sync: false });
+    if (isDurableRoom()) {
+      localEditsPending = true;
+      writeSyncMeta(true);
+      clearTimeout(syncTimer);
+    }
+    clearTimeout(noteSaveTimer);
+    noteSaveTimer = setTimeout(flushNoteSave, 2500);
   });
 
   elements.chapterContent.addEventListener("focusin", (event) => {
@@ -1318,6 +1358,7 @@
   });
 
   elements.chapterContent.addEventListener("focusout", (event) => {
+    if (event.target.matches(".stage-note")) flushNoteSave();
     const picker = event.target.closest(".stage-picker");
     if (picker && !picker.contains(event.relatedTarget)) picker.querySelector(".stage-operator-results").hidden = true;
   });
