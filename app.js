@@ -45,6 +45,7 @@
   let syncSequence = 0;
   let syncTimer = null;
   let pollTimer = null;
+  let overviewTimer = null;
   let syncInFlight = false;
   let pollInFlight = false;
   let lastRoomErrorAt = 0;
@@ -93,6 +94,11 @@
     syncRoomButton: document.querySelector("#syncRoomButton"),
     roomInput: document.querySelector("#roomInput"),
     roomPasswordInput: document.querySelector("#roomPasswordInput"),
+    memberNameInput: document.querySelector("#memberNameInput"),
+    roomDashboard: document.querySelector("#roomDashboard"),
+    onlineCount: document.querySelector("#onlineCount"),
+    onlineMembers: document.querySelector("#onlineMembers"),
+    roomEvents: document.querySelector("#roomEvents"),
     joinRoomButton: document.querySelector("#joinRoomButton"),
   };
 
@@ -238,6 +244,76 @@
     return JSON.parse(JSON.stringify(value));
   }
 
+  function memberName() {
+    return elements.memberNameInput.value.normalize("NFKC").trim().slice(0, 20) || "访客";
+  }
+
+  function summarizeChanges(before, after) {
+    const lines = [];
+    for (const stageId of new Set([...Object.keys(before.assignments || {}), ...Object.keys(after.assignments || {}), ...Object.keys(before.cleared || {}), ...Object.keys(after.cleared || {}), ...Object.keys(before.notes || {}), ...Object.keys(after.notes || {})])) {
+      const previous = (before.assignments?.[stageId] || []).map((item) => item.operatorId);
+      const current = (after.assignments?.[stageId] || []).map((item) => item.operatorId);
+      const added = current.filter((id) => !previous.includes(id)).map((id) => operatorById.get(id)?.name || id);
+      const removed = previous.filter((id) => !current.includes(id)).map((id) => operatorById.get(id)?.name || id);
+      const changes = [];
+      if (added.length) changes.push(`加入 ${added.join("、")}`);
+      if (removed.length) changes.push(`移除 ${removed.join("、")}`);
+      if (Boolean(before.cleared?.[stageId]) !== Boolean(after.cleared?.[stageId])) changes.push(after.cleared?.[stageId] ? "标记通关" : "取消通关");
+      if ((before.notes?.[stageId] || "") !== (after.notes?.[stageId] || "")) changes.push("修改备注");
+      if (changes.length) lines.push(`${stageId}：${changes.join("，")}`);
+    }
+    return (lines.join("；") || "更新房间记录").slice(0, 400);
+  }
+
+  function renderOverview(data) {
+    const members = Array.isArray(data.members) ? data.members : [];
+    elements.onlineCount.textContent = String(members.length);
+    elements.onlineMembers.replaceChildren();
+    for (const member of members) {
+      const chip = document.createElement("span");
+      chip.className = `member-chip${member.self ? " self" : ""}`;
+      chip.textContent = `${member.nickname || "访客"}${member.self ? "（我）" : ""}`;
+      elements.onlineMembers.append(chip);
+    }
+    if (!members.length) elements.onlineMembers.textContent = "暂无在线成员";
+    const events = Array.isArray(data.events) ? data.events : [];
+    elements.roomEvents.replaceChildren();
+    let previousDay = "";
+    for (const event of events) {
+      const when = new Date(event.created_at);
+      if (Number.isNaN(when.getTime())) continue;
+      const day = when.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
+      if (day !== previousDay) {
+        const heading = document.createElement("div");
+        heading.className = "event-day";
+        heading.textContent = day;
+        elements.roomEvents.append(heading);
+        previousDay = day;
+      }
+      const row = document.createElement("div");
+      row.className = "event-row";
+      for (const value of [when.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }), event.actor, event.summary]) {
+        const cell = document.createElement("span");
+        cell.textContent = value || "";
+        row.append(cell);
+      }
+      elements.roomEvents.append(row);
+    }
+    if (!events.length) elements.roomEvents.textContent = "还没有调整记录；新保存的改动会显示在这里。";
+  }
+
+  async function refreshOverview(generation) {
+    if (generation !== roomGeneration || !roomReady || !isDurableRoom()) return;
+    try {
+      const { response, data } = await roomRequest("/rooms/overview", { method: "POST", body: { id: roomId, nickname: memberName() } });
+      if (generation === roomGeneration && response.ok && data) renderOverview(data);
+    } catch { /* State sync reports connection failures separately. */ }
+    if (generation === roomGeneration && roomReady) {
+      clearTimeout(overviewTimer);
+      overviewTimer = setTimeout(() => refreshOverview(generation), document.hidden ? 60000 : 30000);
+    }
+  }
+
   async function roomRequest(path, { method = "GET", body, token = roomToken } = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
@@ -294,6 +370,8 @@
     roomReady = false;
     roomToken = null;
     clearTimeout(pollTimer);
+    clearTimeout(overviewTimer);
+    elements.roomDashboard.hidden = true;
     elements.copyRoomButton.disabled = true;
     elements.syncRoomButton.disabled = true;
     elements.saveState.innerHTML = "<i></i> 仅保存在本机";
@@ -313,7 +391,7 @@
         const payload = await encryptRoomState(snapshot);
         const { response, data } = await roomRequest("/rooms/state", {
           method: "PUT",
-          body: { id: roomId, payload, expectedVersion: roomVersion },
+          body: { id: roomId, payload, expectedVersion: roomVersion, summary: summarizeChanges(base, snapshot) },
         });
         if (generation !== roomGeneration) return;
         if (response.ok && Number.isInteger(data?.version)) {
@@ -326,6 +404,7 @@
           elements.saveState.innerHTML = localEditsPending
             ? "<i></i> 本机已保存 · 云端同步中"
             : "<i></i> 已保存云端";
+          void refreshOverview(generation);
           return;
         }
         if (response.status === 409 && data?.payload && Number.isInteger(data.version)) {
@@ -412,16 +491,16 @@
         method: "POST",
         token: null,
         body: roomIntent === "create"
-          ? { id, name, proof, payload: await encryptRoomState(copyState(state)) }
-          : { id, proof },
+          ? { id, name, proof, nickname: memberName(), payload: await encryptRoomState(copyState(state)) }
+          : { id, proof, nickname: memberName() },
       });
       if (generation !== roomGeneration) return;
       if (roomIntent === "create" && result.response.status === 409) {
-        result = await roomRequest("/rooms/join", { method: "POST", token: null, body: { id, proof } });
+        result = await roomRequest("/rooms/join", { method: "POST", token: null, body: { id, proof, nickname: memberName() } });
       }
       if (generation !== roomGeneration) return;
       if (!result.response.ok || !result.data?.token || !Number.isInteger(result.data.version)) {
-        if (result.response.status === 404 && roomIntent === "join") {
+        if ((result.response.status === 404 || result.response.status === 401) && roomIntent === "join") {
           roomMode = "secure-legacy";
           roomProof = null;
           elements.syncRoomButton.hidden = true;
@@ -455,6 +534,8 @@
       roomBaseState ||= copyState(state);
       writeSyncMeta(localEditsPending);
       markRoomReady();
+      elements.roomDashboard.hidden = false;
+      void refreshOverview(generation);
       setCollabStatus(`房间「${roomName}」 · 已保存到云端`, "ready");
       elements.saveState.innerHTML = localEditsPending
         ? "<i></i> 本机已保存 · 云端同步中"
@@ -585,6 +666,8 @@
     syncSequence += 1;
     clearTimeout(syncTimer);
     clearTimeout(pollTimer);
+    clearTimeout(overviewTimer);
+    elements.roomDashboard.hidden = true;
     if (sharedProvider) sharedProvider.destroy();
     if (sharedDoc) sharedDoc.destroy();
     sharedDoc = null;
@@ -1027,6 +1110,7 @@
     if (!roomReady || !isDurableRoom()) return;
     if (localEditsPending) await publishDurableState();
     else await pollDurableRoom(roomGeneration);
+    if (roomReady) void refreshOverview(roomGeneration);
     if (roomReady) showToast(localEditsPending ? "仍有记录等待云端保存" : "已检查云端最新记录");
   });
   elements.roomInput.addEventListener("keydown", (event) => {
@@ -1038,7 +1122,10 @@
   document.addEventListener("visibilitychange", () => {
     if (!roomReady || !isDurableRoom()) return;
     const generation = roomGeneration;
-    if (!document.hidden) void pollDurableRoom(generation);
+    if (!document.hidden) {
+      void pollDurableRoom(generation);
+      void refreshOverview(generation);
+    }
     scheduleDurablePoll(generation);
   });
   elements.copyRoomButton.addEventListener("click", async () => {
@@ -1274,6 +1361,15 @@
     snapshot();
     state = defaultState();
     commit("银灰塔记录已重置");
+  });
+
+  const savedNickname = localStorage.getItem(`${STORAGE_KEY}:nickname`);
+  elements.memberNameInput.value = savedNickname || `玩家-${Math.random().toString(36).slice(2, 6)}`;
+  if (!savedNickname) localStorage.setItem(`${STORAGE_KEY}:nickname`, elements.memberNameInput.value);
+  elements.memberNameInput.addEventListener("change", () => {
+    elements.memberNameInput.value = memberName();
+    localStorage.setItem(`${STORAGE_KEY}:nickname`, memberName());
+    if (roomReady && isDurableRoom()) void refreshOverview(roomGeneration);
   });
 
   if (initialParams.get("name")) elements.roomInput.value = initialParams.get("name");
