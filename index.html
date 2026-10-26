@@ -9,7 +9,7 @@
       content="银灰塔作战板：拖动干员到明日方舟主线关卡，记录一次性干员消耗与通关进度。"
     />
     <title>银灰塔作战板</title>
-    <link rel="stylesheet" href="./styles.css?v=5" />
+    <link rel="stylesheet" href="./styles.css?v=7" />
   </head>
   <body>
     <div class="noise" aria-hidden="true"></div>
@@ -43,10 +43,23 @@
         <span id="collabStatus">本机记录 · 还没有共享</span>
       </div>
       <div class="collab-actions">
-        <button class="ghost-button" id="createRoomButton" type="button">创建协作房间</button>
-        <button class="ghost-button" id="copyRoomButton" type="button" disabled>复制房间链接</button>
-        <input id="roomInput" type="text" placeholder="粘贴房间链接或房间号" autocomplete="off" />
-        <button class="ghost-button" id="joinRoomButton" type="button">加入</button>
+        <div class="room-fields">
+          <label class="room-field" for="roomInput">
+            <span>房间名</span>
+            <input id="roomInput" type="text" placeholder="输入房间名或粘贴邀请链接" autocomplete="off" maxlength="200" />
+          </label>
+          <label class="room-field" for="roomPasswordInput">
+            <span>房间密码</span>
+            <input id="roomPasswordInput" type="password" placeholder="创建或加入时输入密码" autocomplete="new-password" maxlength="128" />
+          </label>
+        </div>
+        <div class="room-buttons">
+          <button class="ghost-button" id="createRoomButton" type="button">创建房间</button>
+          <button class="ghost-button" id="joinRoomButton" type="button">加入房间</button>
+          <button class="ghost-button" id="leaveRoomButton" type="button" hidden>退出房间</button>
+          <button class="ghost-button" id="copyRoomButton" type="button" disabled>复制邀请链接</button>
+        </div>
+        <p class="room-hint">队友输入相同房间名和密码即可加入；邀请链接不含密码，请单独告知。协作记录建议定期导出备份。</p>
       </div>
     </section>
 
@@ -82,7 +95,7 @@
           <div>
             <p class="section-kicker">MAIN THEME / EPISODE 00—17</p>
             <h2>主线行动</h2>
-            <p class="mission-copy">常规战斗关与绝境作战 H 关。拖入干员即计为本次挑战已使用。</p>
+            <p class="mission-copy">在关卡内搜索名字即可添加，也支持拖入干员。编入即计为本次挑战已使用。</p>
           </div>
           <div class="stage-search search-box">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m16 16 5 5"></path></svg>
@@ -163,6 +176,7 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script src="./data.js?v=3"></script>
-    <script src="./app.js?v=6"></script>
+    <script src="./app.js?v=8"></script>
   </body>
 </html>
+

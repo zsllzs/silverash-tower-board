@@ -1,12 +1,7 @@
 (() => {
   const DATA = window.SILVERASH_DATA;
   const STORAGE_KEY = "silverash-tower-board-v1";
-  const CLIENT_ID_KEY = "silverash-tower-client-id";
-  const clientId = localStorage.getItem(CLIENT_ID_KEY) || (() => {
-    const id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    localStorage.setItem(CLIENT_ID_KEY, id);
-    return id;
-  })();
+  const clientId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const professions = ["先锋", "近卫", "重装", "狙击", "术师", "医疗", "辅助", "特种"];
   const colors = {
     先锋: "#50c9b5", 近卫: "#ef7b67", 重装: "#d8a546", 狙击: "#7ab8ee",
@@ -27,7 +22,9 @@
     revision: 0,
   });
 
-  let state = loadState();
+  const initialParams = new URLSearchParams(window.location.search);
+  const initialLegacyRoom = initialParams.get("room");
+  let state = loadState(initialLegacyRoom ? `${STORAGE_KEY}:room:${initialLegacyRoom}` : STORAGE_KEY, Boolean(initialLegacyRoom));
   let history = [];
   let selectedChapter = "17";
   let selectedProfession = "全部";
@@ -36,7 +33,15 @@
   let selectedOperatorId = null;
   let dragged = null;
   let toastTimer = null;
-  let roomId = new URLSearchParams(window.location.search).get("room");
+  let roomId = initialLegacyRoom;
+  let roomName = initialLegacyRoom || "";
+  let roomMode = initialLegacyRoom ? "legacy" : "";
+  let roomKey = null;
+  let roomNameKey = "";
+  let roomIntent = initialLegacyRoom ? "join" : "";
+  let roomReady = false;
+  let roomGeneration = 0;
+  let syncSequence = 0;
   let syncTimer = null;
   let pollTimer = null;
   let syncInFlight = false;
@@ -75,13 +80,19 @@
     collabStatus: document.querySelector("#collabStatus"),
     createRoomButton: document.querySelector("#createRoomButton"),
     copyRoomButton: document.querySelector("#copyRoomButton"),
+    leaveRoomButton: document.querySelector("#leaveRoomButton"),
     roomInput: document.querySelector("#roomInput"),
+    roomPasswordInput: document.querySelector("#roomPasswordInput"),
     joinRoomButton: document.querySelector("#joinRoomButton"),
   };
 
-  function loadState() {
+  function activeStorageKey() {
+    return roomId ? `${STORAGE_KEY}:room:${roomId}` : STORAGE_KEY;
+  }
+
+  function loadState(key = STORAGE_KEY, legacyFallback = false) {
     try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+      const saved = JSON.parse(localStorage.getItem(key) || (legacyFallback ? localStorage.getItem(STORAGE_KEY) : null));
       return saved && typeof saved === "object" ? { ...defaultState(), ...saved } : defaultState();
     } catch {
       return defaultState();
@@ -97,118 +108,274 @@
   function saveState({ sync = true } = {}) {
     state.updatedAt = new Date().toISOString();
     if (roomId && sync) state.revision = Number(state.revision || 0) + 1;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(activeStorageKey(), JSON.stringify(state));
     elements.saveState.innerHTML = "<i></i> 已自动保存";
     if (roomId && sync) queueSharedSync();
   }
 
-  function normalizeRoomId(value) {
+  function parseRoomInput(value) {
     const input = String(value || "").trim();
-    if (!input) return "";
+    if (!input) return null;
     try {
       const url = new URL(input);
-      return url.searchParams.get("room") || url.pathname.split("/").filter(Boolean).pop() || "";
-    } catch {
-      return input.replace(/^.*room=/, "").split(/[?#&]/)[0];
-    }
+      if (url.searchParams.get("name")) return { mode: "secure", name: url.searchParams.get("name").trim() };
+      if (url.searchParams.get("room")) return { mode: "legacy", name: url.searchParams.get("room").trim() };
+    } catch { /* A plain room name is valid too. */ }
+    if (/^at-[a-z0-9-]+$/i.test(input)) return { mode: "legacy", name: input };
+    return { mode: "secure", name: input };
   }
 
   function roomUrl() {
     const url = new URL(window.location.href);
-    url.searchParams.set("room", roomId);
+    url.searchParams.delete("room");
+    url.searchParams.delete("name");
+    if (roomMode === "secure") url.searchParams.set("name", roomName);
+    else if (roomId) url.searchParams.set("room", roomId);
     return url.toString();
   }
 
-  function queueSharedSync() {
-    if (!roomId || !sharedMap || remoteApplying) return;
-    clearTimeout(syncTimer);
-    setCollabStatus("协作房间 · 正在同步", "pending");
-    syncTimer = setTimeout(() => {
-      sharedMap.set("state", JSON.parse(JSON.stringify(state)));
-      sharedMap.set("writer", clientId);
-      sharedMap.set("updatedAt", state.updatedAt || new Date().toISOString());
-      setCollabStatus("协作房间 · 已同步", "ready");
-    }, 120);
+  function lockBoard(locked) {
+    document.querySelector(".workspace").inert = locked;
+    document.querySelector(".top-actions").inert = locked;
+    document.body.classList.toggle("room-connecting", locked);
   }
 
-  function applyRemoteState(nextState) {
+  function bytesToBase64(bytes) {
+    let binary = "";
+    for (let index = 0; index < bytes.length; index += 32768) {
+      binary += String.fromCharCode(...bytes.subarray(index, index + 32768));
+    }
+    return btoa(binary);
+  }
+
+  function base64ToBytes(value) {
+    return Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+  }
+
+  async function deriveRoom(name, password) {
+    const normalized = name.normalize("NFKC").trim().toLowerCase();
+    const encoder = new TextEncoder();
+    const source = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits({
+      name: "PBKDF2",
+      salt: encoder.encode(`silverash-tower-room-v2:${normalized}`),
+      iterations: 250000,
+      hash: "SHA-256",
+    }, source, 512);
+    const bytes = new Uint8Array(bits);
+    const id = `secure-${[...bytes.subarray(0, 32)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+    const key = await crypto.subtle.importKey("raw", bytes.subarray(32), "AES-GCM", false, ["encrypt", "decrypt"]);
+    return { id, key, normalized };
+  }
+
+  async function encryptRoomState(nextState) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const plaintext = new TextEncoder().encode(JSON.stringify({ format: "silverash-room-v2", name: roomNameKey, state: nextState }));
+    const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, roomKey, plaintext);
+    return { iv: bytesToBase64(iv), data: bytesToBase64(new Uint8Array(encrypted)) };
+  }
+
+  async function decryptRoomState(payload) {
+    const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(payload.iv) }, roomKey, base64ToBytes(payload.data));
+    const contents = JSON.parse(new TextDecoder().decode(decrypted));
+    if (contents.format !== "silverash-room-v2" || contents.name !== roomNameKey) throw new Error("房间密码不匹配");
+    return contents.state;
+  }
+
+  async function publishCurrentState() {
+    if (!roomReady || !sharedMap) return;
+    const generation = roomGeneration;
+    const sequence = ++syncSequence;
+    const copy = JSON.parse(JSON.stringify(state));
+    try {
+      const payload = roomMode === "secure" ? await encryptRoomState(copy) : copy;
+      if (generation !== roomGeneration || sequence !== syncSequence || !sharedMap) return;
+      sharedDoc.transact(() => {
+        sharedMap.set("writer", clientId);
+        sharedMap.set(roomMode === "secure" ? "payload" : "state", payload);
+      });
+      setCollabStatus(`房间「${roomName}」 · 已同步`, "ready");
+    } catch {
+      setCollabStatus(`房间「${roomName}」 · 同步失败`, "error");
+      showToast("同步失败，请先导出记录备份");
+    }
+  }
+
+  function queueSharedSync() {
+    if (!roomReady || !sharedMap || remoteApplying) return;
+    clearTimeout(syncTimer);
+    setCollabStatus(`房间「${roomName}」 · 正在同步`, "pending");
+    syncTimer = setTimeout(publishCurrentState, 120);
+  }
+
+  function applyRemoteState(nextState, { force = false } = {}) {
     if (!nextState || typeof nextState !== "object" || !nextState.assignments) return;
-    const remoteTime = nextState.updatedAt ? Date.parse(nextState.updatedAt) : 0;
-    const localTime = state.updatedAt ? Date.parse(state.updatedAt) : 0;
-    if (remoteTime <= localTime && Number(nextState.revision || 0) <= Number(state.revision || 0)) return;
+    if (!force && JSON.stringify(nextState) === JSON.stringify(state)) return;
     remoteApplying = true;
     state = { ...defaultState(), ...nextState };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(activeStorageKey(), JSON.stringify(state));
     history = [];
     renderAll();
     remoteApplying = false;
-    showToast("已同步协作者的最新记录");
+    if (!force) showToast("已同步协作者的最新记录");
   }
 
-  async function initSharedRoom() {
-    if (!roomId) return;
-    setCollabStatus("协作房间 · 正在连接", "pending");
+  function markRoomReady() {
+    roomReady = true;
+    lockBoard(false);
+    elements.copyRoomButton.disabled = false;
+    setCollabStatus(`房间「${roomName}」 · 已连接`, "ready");
+  }
+
+  async function receiveRoomState(generation, initial = false) {
+    if (generation !== roomGeneration || !sharedMap) return;
+    const payload = sharedMap.get(roomMode === "secure" ? "payload" : "state");
+    if (!payload || (sharedMap.get("writer") === clientId && roomReady && !initial)) return;
+    try {
+      const nextState = roomMode === "secure" ? await decryptRoomState(payload) : payload;
+      if (generation !== roomGeneration) return;
+      applyRemoteState(nextState, { force: !roomReady });
+      if (!roomReady) markRoomReady();
+    } catch {
+      if (generation !== roomGeneration) return;
+      setCollabStatus(`房间「${roomName}」 · 密码或记录无效`, "error");
+      showToast("无法读取房间记录，请检查密码");
+    }
+  }
+
+  async function initSharedRoom(generation) {
+    setCollabStatus(`房间「${roomName}」 · 正在连接`, "pending");
     try {
       const [{ Doc }, { WebsocketProvider }] = await Promise.all([
         import("https://esm.sh/yjs@13.6.27"),
         import("https://esm.sh/y-websocket@2.0.4"),
       ]);
+      if (generation !== roomGeneration) return;
       sharedDoc = new Doc();
       sharedMap = sharedDoc.getMap("silverash-tower-board");
-      sharedMap.observe(() => {
-        if (sharedMap.get("writer") !== clientId) applyRemoteState(sharedMap.get("state"));
-      });
+      sharedMap.observe(() => { void receiveRoomState(generation); });
       sharedProvider = new WebsocketProvider("wss://demos.yjs.dev/ws", `silverash-tower-${roomId}`, sharedDoc);
-      sharedProvider.on("status", ({ status }) => setCollabStatus(status === "connected" ? "协作房间 · 已连接" : "协作房间 · 正在重连", status === "connected" ? "ready" : "pending"));
+      sharedProvider.on("status", ({ status }) => {
+        if (generation !== roomGeneration) return;
+        setCollabStatus(status === "connected"
+          ? `房间「${roomName}」 · ${roomReady ? "已连接" : "正在验证"}`
+          : `房间「${roomName}」 · 正在重连`, status === "connected" && roomReady ? "ready" : "pending");
+      });
       sharedProvider.on("sync", (synced) => {
-        if (!synced) return;
-        if (sharedMap.get("state")) applyRemoteState(sharedMap.get("state"));
-        else queueSharedSync();
+        if (!synced || generation !== roomGeneration) return;
+        const existing = sharedMap.get(roomMode === "secure" ? "payload" : "state");
+        if (existing) {
+          void receiveRoomState(generation, true);
+        } else if (roomIntent === "create" || roomMode === "legacy") {
+          if (!state.updatedAt) saveState({ sync: false });
+          markRoomReady();
+          void publishCurrentState();
+          showToast("房间已创建，分享链接并单独告知密码");
+        } else {
+          setCollabStatus(`房间「${roomName}」 · 未找到房间或密码错误`, "error");
+          showToast("未找到房间，请核对名称和密码；房主可能需要先在线");
+        }
       });
     } catch {
-      setCollabStatus("协作房间 · 连接失败，请重试", "error");
-      showToast("协作服务暂时不可用，记录仍保存在本机");
+      if (generation !== roomGeneration) return;
+      setCollabStatus(`房间「${roomName}」 · 连接失败`, "error");
+      showToast("协作服务暂时不可用，请稍后重试");
     }
   }
 
   function startRoom() {
-    clearInterval(pollTimer);
+    roomGeneration += 1;
+    syncSequence += 1;
+    clearTimeout(syncTimer);
     if (sharedProvider) sharedProvider.destroy();
+    if (sharedDoc) sharedDoc.destroy();
     sharedDoc = null;
     sharedMap = null;
     sharedProvider = null;
+    roomReady = false;
+    elements.copyRoomButton.disabled = true;
+    elements.leaveRoomButton.hidden = !roomId;
+    lockBoard(Boolean(roomId));
     if (!roomId) {
-      elements.copyRoomButton.disabled = true;
-      setCollabStatus("本机记录 · 还没有共享");
+      setCollabStatus(elements.roomInput.value ? "输入密码即可加入该房间" : "本机记录 · 还没有共享");
       return;
     }
-    elements.copyRoomButton.disabled = false;
-    elements.roomInput.value = roomId;
-    sharedReady = initSharedRoom();
+    elements.roomInput.value = roomName;
+    void initSharedRoom(roomGeneration);
   }
 
   async function createRoom() {
-    if (!state.updatedAt) saveState({ sync: false });
+    const name = elements.roomInput.value.normalize("NFKC").trim();
+    const password = elements.roomPasswordInput.value;
+    if (name.length < 2 || name.length > 40 || /^https?:\/\//i.test(name)) return showToast("房间名请输入 2～40 个字");
+    if (password.length < 8) return showToast("密码至少需要 8 位");
     setCollabStatus("正在创建协作房间…", "pending");
     try {
-      roomId = `at-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      state.revision = Math.max(1, Number(state.revision || 0));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      const credentials = await deriveRoom(name, password);
+      const currentState = JSON.parse(JSON.stringify(state));
+      roomId = credentials.id;
+      roomName = name;
+      roomNameKey = credentials.normalized;
+      roomKey = credentials.key;
+      roomMode = "secure";
+      roomIntent = "create";
+      state = { ...defaultState(), ...currentState };
+      history = [];
+      elements.roomPasswordInput.value = "";
       window.history.replaceState({}, "", roomUrl());
+      renderAll();
       startRoom();
-      showToast("协作房间已创建，复制链接发给队友即可");
     } catch {
       setCollabStatus("创建失败，请稍后重试", "error");
-      showToast("暂时无法创建协作房间，请检查网络");
+      showToast("无法创建房间，请检查浏览器是否支持安全连接");
     }
   }
 
-  function joinRoom() {
-    const nextRoomId = normalizeRoomId(elements.roomInput.value);
-    if (!nextRoomId) return showToast("请粘贴有效的房间链接或房间号");
-    roomId = nextRoomId;
-    window.history.replaceState({}, "", roomUrl());
+  async function joinRoom() {
+    const parsed = parseRoomInput(elements.roomInput.value);
+    if (!parsed) return showToast("请输入房间名或邀请链接");
+    if (parsed.name.length > 40) return showToast("房间名不能超过 40 个字");
+    const password = elements.roomPasswordInput.value;
+    if (parsed.mode === "secure" && !password) return showToast("请输入房间密码");
+    setCollabStatus("正在加入协作房间…", "pending");
+    try {
+      const credentials = parsed.mode === "secure" ? await deriveRoom(parsed.name, password) : null;
+      roomId = credentials?.id || parsed.name;
+      roomName = parsed.name;
+      roomNameKey = credentials?.normalized || "";
+      roomKey = credentials?.key || null;
+      roomMode = parsed.mode;
+      roomIntent = "join";
+      state = loadState(activeStorageKey(), parsed.mode === "legacy");
+      history = [];
+      elements.roomPasswordInput.value = "";
+      window.history.replaceState({}, "", roomUrl());
+      renderAll();
+      startRoom();
+    } catch {
+      setCollabStatus("加入失败，请稍后重试", "error");
+      showToast("无法加入房间，请检查房间名和密码");
+    }
+  }
+
+  function leaveRoom() {
+    roomId = null;
+    roomName = "";
+    roomNameKey = "";
+    roomKey = null;
+    roomMode = "";
+    roomIntent = "";
+    state = loadState();
+    history = [];
+    const url = new URL(window.location.href);
+    url.searchParams.delete("room");
+    url.searchParams.delete("name");
+    window.history.replaceState({}, "", url);
+    elements.roomInput.value = "";
+    elements.roomPasswordInput.value = "";
+    renderAll();
     startRoom();
+    showToast("已退出协作房间，返回本机记录");
   }
 
   function snapshot() {
@@ -381,6 +548,12 @@
   }
 
   function renderStages() {
+    const activeSearch = document.activeElement?.closest(".stage-operator-search");
+    const searchDraft = activeSearch ? {
+      stageId: activeSearch.closest(".stage-card").dataset.stageId,
+      value: activeSearch.value,
+      cursor: activeSearch.selectionStart,
+    } : null;
     const query = elements.stageSearch.value.trim().toLowerCase();
     const chapters = selectedChapter === "all" ? DATA.chapters : [chapterById.get(selectedChapter)].filter(Boolean);
     let visibleCount = 0;
@@ -410,6 +583,15 @@
 
     elements.chapterContent.innerHTML = content || `<div class="no-stage-result">没有符合条件的关卡</div>`;
     elements.stageCount.textContent = `${visibleCount} 个作战关卡`;
+    if (searchDraft) {
+      const input = document.getElementById(`operator-search-${searchDraft.stageId}`);
+      if (input) {
+        input.value = searchDraft.value;
+        input.focus({ preventScroll: true });
+        input.setSelectionRange(searchDraft.cursor, searchDraft.cursor);
+        renderStageOperatorResults(input);
+      }
+    }
   }
 
   function renderStageCard(stage) {
@@ -439,8 +621,47 @@
             </div>`;
           }).join("")}</div>` : `<div class="drop-copy">拖放干员到这里</div>`}
         </div>
+        <div class="stage-picker">
+          <label class="stage-picker-label" for="operator-search-${stage.id}">＋ 搜索添加干员</label>
+          <input id="operator-search-${stage.id}" class="stage-operator-search" type="text" autocomplete="off" placeholder="输入干员名字…" aria-label="搜索干员并添加到 ${stage.code}" aria-controls="operator-results-${stage.id}">
+          <div id="operator-results-${stage.id}" class="stage-operator-results" aria-label="${stage.code} 的干员搜索结果" hidden></div>
+        </div>
         ${hasNote ? `<textarea class="stage-note" placeholder="记录技能、站位或打法…">${escapeHtml(state.notes[stage.id] || "")}</textarea>` : ""}
       </article>`;
+  }
+
+  function stageOperatorMatches(input) {
+    const query = input.value.trim().toLowerCase();
+    if (!query) return [];
+    const stageId = input.closest(".stage-card").dataset.stageId;
+    return DATA.operators.filter((operator) => operator.name.toLowerCase().includes(query)).map((operator) => {
+      const placement = operatorPlacement(operator.id);
+      const status = operator.id === silverash.id ? "已默认编入"
+        : assignmentList(stageId).some((item) => item.operatorId === operator.id) ? "已在本关"
+        : !isAvailable(operator) ? `已用于 ${placement.stageId}` : "点击编入";
+      return { operator, status, available: status === "点击编入" };
+    }).sort((a, b) => Number(b.available) - Number(a.available)
+      || Number(b.operator.name.toLowerCase() === query) - Number(a.operator.name.toLowerCase() === query)
+      || b.operator.rarity - a.operator.rarity
+      || a.operator.name.localeCompare(b.operator.name, "zh-CN"));
+  }
+
+  function renderStageOperatorResults(input) {
+    const results = input.closest(".stage-picker").querySelector(".stage-operator-results");
+    const matches = stageOperatorMatches(input);
+    results.hidden = !input.value.trim();
+    results.innerHTML = matches.length ? matches.map(({ operator, status, available }) => `
+      <button type="button" class="stage-operator-option" data-add-operator="${escapeHtml(operator.id)}" ${available ? "" : "disabled"}>
+        <span><strong>${escapeHtml(operator.name)}</strong><small>${operator.rarity}★ · ${escapeHtml(operator.profession)}</small></span>
+        <span class="stage-option-status">${escapeHtml(status)}</span>
+      </button>`).join("") : '<p class="stage-search-empty" role="status">没有找到该干员，请换个名字</p>';
+  }
+
+  function addSearchedOperator(input, operatorId) {
+    const stageId = input.closest(".stage-card").dataset.stageId;
+    input.value = "";
+    addOperatorToStage(operatorId, stageId);
+    document.getElementById(`operator-search-${stageId}`)?.focus({ preventScroll: true });
   }
 
   function escapeHtml(value) {
@@ -473,7 +694,11 @@
   elements.stageSearch.addEventListener("input", renderStages);
   elements.createRoomButton.addEventListener("click", createRoom);
   elements.joinRoomButton.addEventListener("click", joinRoom);
+  elements.leaveRoomButton.addEventListener("click", leaveRoom);
   elements.roomInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") joinRoom();
+  });
+  elements.roomPasswordInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") joinRoom();
   });
   elements.copyRoomButton.addEventListener("click", async () => {
@@ -489,7 +714,7 @@
       document.execCommand("copy");
       helper.remove();
     }
-    showToast("房间链接已复制");
+    showToast("邀请链接已复制，密码请单独告知队友");
   });
 
   elements.professionTabs.addEventListener("click", (event) => {
@@ -585,6 +810,13 @@
     const stageCard = event.target.closest(".stage-card");
     if (!stageCard) return;
     const stageId = stageCard.dataset.stageId;
+    if (event.target.closest(".stage-picker")) {
+      const option = event.target.closest("button[data-add-operator]");
+      if (option && !option.disabled) {
+        addSearchedOperator(stageCard.querySelector(".stage-operator-search"), option.dataset.addOperator);
+      }
+      return;
+    }
     const removeButton = event.target.closest(".remove-operator");
     if (removeButton) {
       const chip = removeButton.closest(".operator-chip");
@@ -612,11 +844,50 @@
   });
 
   elements.chapterContent.addEventListener("input", (event) => {
+    if (event.target.matches(".stage-operator-search")) {
+      renderStageOperatorResults(event.target);
+      return;
+    }
     const textarea = event.target.closest(".stage-note");
     if (!textarea) return;
     const stageId = textarea.closest(".stage-card").dataset.stageId;
     state.notes[stageId] = textarea.value;
     saveState();
+  });
+
+  elements.chapterContent.addEventListener("focusin", (event) => {
+    if (event.target.matches(".stage-operator-search")) renderStageOperatorResults(event.target);
+  });
+
+  elements.chapterContent.addEventListener("focusout", (event) => {
+    const picker = event.target.closest(".stage-picker");
+    if (picker && !picker.contains(event.relatedTarget)) picker.querySelector(".stage-operator-results").hidden = true;
+  });
+
+  elements.chapterContent.addEventListener("keydown", (event) => {
+    const picker = event.target.closest(".stage-picker");
+    if (!picker || event.isComposing || event.keyCode === 229) return;
+    const input = picker.querySelector(".stage-operator-search");
+    if (event.key === "Escape") {
+      event.preventDefault();
+      input.focus();
+      picker.querySelector(".stage-operator-results").hidden = true;
+    } else if (event.target === input && event.key === "Enter") {
+      event.preventDefault();
+      const available = stageOperatorMatches(input).filter((match) => match.available);
+      const exact = available.find(({ operator }) => operator.name.toLowerCase() === input.value.trim().toLowerCase());
+      const match = exact || (available.length === 1 ? available[0] : null);
+      if (match) addSearchedOperator(input, match.operator.id);
+      else if (input.value.trim()) showToast(available.length ? "请点击要编入的干员" : "没有匹配的可用干员");
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (event.target === input) renderStageOperatorResults(input);
+      const options = [...picker.querySelectorAll(".stage-operator-option:not(:disabled)")];
+      const index = options.indexOf(event.target);
+      const next = event.key === "ArrowDown" ? index + 1 : (index < 0 ? options.length - 1 : index - 1);
+      if (next >= 0 && next < options.length) options[next].focus();
+      else input.focus();
+    }
   });
 
   elements.clearSelection.addEventListener("click", () => {
@@ -665,6 +936,8 @@
     commit("银灰塔记录已重置");
   });
 
+  if (initialParams.get("name")) elements.roomInput.value = initialParams.get("name");
   renderAll();
   startRoom();
 })();
+
