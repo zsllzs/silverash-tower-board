@@ -9,7 +9,7 @@
       content="银灰塔作战板：拖动干员到明日方舟主线关卡，记录一次性干员消耗与通关进度。"
     />
     <title>银灰塔作战板</title>
-    <link rel="stylesheet" href="./styles.css?v=8" />
+    <link rel="stylesheet" href="./styles.css?v=9" />
   </head>
   <body>
     <div class="noise" aria-hidden="true"></div>
@@ -52,6 +52,10 @@
             <span>房间密码</span>
             <input id="roomPasswordInput" type="password" placeholder="创建或加入时输入密码" autocomplete="new-password" maxlength="128" />
           </label>
+          <label class="room-field" for="memberNameInput">
+            <span>我的昵称</span>
+            <input id="memberNameInput" type="text" placeholder="让队友认出你" autocomplete="nickname" maxlength="20" />
+          </label>
         </div>
         <div class="room-buttons">
           <button class="ghost-button" id="createRoomButton" type="button">创建房间</button>
@@ -62,6 +66,11 @@
         </div>
         <p class="room-hint" id="roomHint">队友输入相同房间名和密码即可加入；邀请链接不含密码，请单独告知。协作记录建议定期导出备份。</p>
       </div>
+    </section>
+
+    <section class="room-dashboard" id="roomDashboard" aria-label="房间动态" hidden>
+      <div class="room-online"><strong>当前在线 <span id="onlineCount">0</span></strong><div id="onlineMembers" class="member-list">连接后显示</div></div>
+      <div class="room-activity"><strong>每日调整</strong><div id="roomEvents" class="event-list">还没有调整记录</div></div>
     </section>
 
     <main class="workspace">
@@ -178,7 +187,7 @@
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script src="./data.js?v=3"></script>
     <script src="./room-config.js?v=1"></script>
-    <script src="./app.js?v=10"></script>
+    <script src="./app.js?v=11"></script>
   </body>
 </html>
 
