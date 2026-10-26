@@ -303,10 +303,14 @@
         const note = /备注/.test(detail);
         if (!status && !note) continue;
         const key = `${day}|${stage}`;
-        if (!grouped.has(key)) grouped.set(key, { day, stage, status: null, note: false });
+        if (!grouped.has(key)) grouped.set(key, { day, stage, status: null, statusActor: null, noteActors: new Set() });
         const item = grouped.get(key);
-        item.status ||= status;
-        item.note ||= note;
+        const actor = String(event.actor || "成员").trim() || "成员";
+        if (status && !item.status) {
+          item.status = status;
+          item.statusActor = actor;
+        }
+        if (note) item.noteActors.add(actor);
       }
     }
     elements.roomEvents.replaceChildren();
@@ -322,7 +326,11 @@
       }
       const row = document.createElement("div");
       row.className = "event-row";
-      row.textContent = `${item.stage} · ${[item.status, item.note ? "备注有改动" : null].filter(Boolean).join(" · ")}`;
+      const details = [
+        item.status ? `${item.status}（${item.statusActor}）` : null,
+        item.noteActors.size ? `备注有改动（${[...item.noteActors].join("、")}）` : null,
+      ].filter(Boolean);
+      row.textContent = `${item.stage} · ${details.join(" · ")}`;
       elements.roomEvents.append(row);
     }
     if (!grouped.size) elements.roomEvents.textContent = "还没有通关或备注调整。";
