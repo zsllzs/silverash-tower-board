@@ -156,6 +156,10 @@
     return roomMode === "secure" && Boolean(DURABLE_ROOM_API);
   }
 
+  function isEncryptedRoom() {
+    return roomMode === "secure" || roomMode === "secure-legacy";
+  }
+
   function parseRoomInput(value) {
     const input = String(value || "").trim();
     if (!input) return null;
@@ -172,7 +176,7 @@
     const url = new URL(window.location.href);
     url.searchParams.delete("room");
     url.searchParams.delete("name");
-    if (roomMode === "secure") url.searchParams.set("name", roomName);
+    if (isEncryptedRoom()) url.searchParams.set("name", roomName);
     else if (roomId) url.searchParams.set("room", roomId);
     return url.toString();
   }
@@ -417,7 +421,16 @@
       }
       if (generation !== roomGeneration) return;
       if (!result.response.ok || !result.data?.token || !Number.isInteger(result.data.version)) {
-        if (result.response.status === 404) throw new Error("没有找到房间，请先让房主创建");
+        if (result.response.status === 404 && roomIntent === "join") {
+          roomMode = "secure-legacy";
+          roomProof = null;
+          elements.syncRoomButton.hidden = true;
+          elements.roomHint.textContent = "这是旧版密码房间，仍使用临时协作服务。进入后可点击“创建房间”，用相同名称和密码把当前记录保存到云端。";
+          setCollabStatus(`房间「${roomName}」 · 正在查找旧版房间`, "pending");
+          void initSharedRoom(generation);
+          return;
+        }
+        if (result.response.status === 404) throw new Error("没有找到房间，请先创建");
         if (result.response.status === 401 || result.response.status === 403) throw new Error("房间不存在或密码不正确");
         throw new Error(result.data?.error || "无法连接房间数据库");
       }
@@ -464,11 +477,11 @@
     const sequence = ++syncSequence;
     const copy = JSON.parse(JSON.stringify(state));
     try {
-      const payload = roomMode === "secure" ? await encryptRoomState(copy) : copy;
+      const payload = isEncryptedRoom() ? await encryptRoomState(copy) : copy;
       if (generation !== roomGeneration || sequence !== syncSequence || !sharedMap) return;
       sharedDoc.transact(() => {
         sharedMap.set("writer", clientId);
-        sharedMap.set(roomMode === "secure" ? "payload" : "state", payload);
+        sharedMap.set(isEncryptedRoom() ? "payload" : "state", payload);
       });
       setCollabStatus(`房间「${roomName}」 · 已同步`, "ready");
     } catch {
@@ -513,10 +526,10 @@
 
   async function receiveRoomState(generation, initial = false) {
     if (generation !== roomGeneration || !sharedMap) return;
-    const payload = sharedMap.get(roomMode === "secure" ? "payload" : "state");
+    const payload = sharedMap.get(isEncryptedRoom() ? "payload" : "state");
     if (!payload || (sharedMap.get("writer") === clientId && roomReady && !initial)) return;
     try {
-      const nextState = roomMode === "secure" ? await decryptRoomState(payload) : payload;
+      const nextState = isEncryptedRoom() ? await decryptRoomState(payload) : payload;
       if (generation !== roomGeneration) return;
       applyRemoteState(nextState, { force: !roomReady });
       if (!roomReady) markRoomReady();
@@ -547,7 +560,7 @@
       });
       sharedProvider.on("sync", (synced) => {
         if (!synced || generation !== roomGeneration) return;
-        const existing = sharedMap.get(roomMode === "secure" ? "payload" : "state");
+        const existing = sharedMap.get(isEncryptedRoom() ? "payload" : "state");
         if (existing) {
           void receiveRoomState(generation, true);
         } else if (roomIntent === "create" || roomMode === "legacy") {
@@ -590,7 +603,9 @@
     elements.syncRoomButton.hidden = !roomId || !isDurableRoom();
     elements.syncRoomButton.disabled = true;
     if (elements.roomHint) {
-      elements.roomHint.textContent = roomMode === "legacy"
+      elements.roomHint.textContent = roomMode === "secure-legacy"
+        ? "这是旧版密码房间，仍使用临时协作服务。可点击“创建房间”将当前记录保存到云端。"
+        : roomMode === "legacy"
         ? "这是旧版临时房间：没有密码，也没有云端长期保存。请导出记录备份。"
         : DURABLE_ROOM_API
           ? "同名同密码可加入；邀请链接不含密码。队友更新约 30 秒内显示，可点“立即同步”。记录保存在云端，也建议定期导出备份。"
