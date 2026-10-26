@@ -1,6 +1,7 @@
 (() => {
   const DATA = window.SILVERASH_DATA;
   const STORAGE_KEY = "silverash-tower-board-v1";
+  const DURABLE_ROOM_API = String(window.SILVERASH_ROOM_API || "").replace(/\/+$/, "");
   const clientId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const professions = ["先锋", "近卫", "重装", "狙击", "术师", "医疗", "辅助", "特种"];
   const colors = {
@@ -45,7 +46,14 @@
   let syncTimer = null;
   let pollTimer = null;
   let syncInFlight = false;
-  let lastPushedAt = null;
+  let pollInFlight = false;
+  let lastRoomErrorAt = 0;
+  let roomProof = null;
+  let roomToken = null;
+  let roomVersion = 0;
+  let roomBaseState = null;
+  let localEditsPending = false;
+  let durableRetryDelay = 3000;
   let sharedDoc = null;
   let sharedMap = null;
   let sharedProvider = null;
@@ -78,9 +86,11 @@
     resetButton: document.querySelector("#resetButton"),
     toast: document.querySelector("#toast"),
     collabStatus: document.querySelector("#collabStatus"),
+    roomHint: document.querySelector("#roomHint"),
     createRoomButton: document.querySelector("#createRoomButton"),
     copyRoomButton: document.querySelector("#copyRoomButton"),
     leaveRoomButton: document.querySelector("#leaveRoomButton"),
+    syncRoomButton: document.querySelector("#syncRoomButton"),
     roomInput: document.querySelector("#roomInput"),
     roomPasswordInput: document.querySelector("#roomPasswordInput"),
     joinRoomButton: document.querySelector("#joinRoomButton"),
@@ -88,6 +98,27 @@
 
   function activeStorageKey() {
     return roomId ? `${STORAGE_KEY}:room:${roomId}` : STORAGE_KEY;
+  }
+
+  function activeSyncMetaKey() {
+    return `${STORAGE_KEY}:sync:${roomId}`;
+  }
+
+  function readSyncMeta() {
+    try {
+      return JSON.parse(localStorage.getItem(activeSyncMetaKey())) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeSyncMeta(dirty = localEditsPending) {
+    if (!isDurableRoom()) return;
+    localStorage.setItem(activeSyncMetaKey(), JSON.stringify({
+      version: roomVersion,
+      baseState: roomBaseState,
+      dirty,
+    }));
   }
 
   function loadState(key = STORAGE_KEY, legacyFallback = false) {
@@ -109,8 +140,20 @@
     state.updatedAt = new Date().toISOString();
     if (roomId && sync) state.revision = Number(state.revision || 0) + 1;
     localStorage.setItem(activeStorageKey(), JSON.stringify(state));
-    elements.saveState.innerHTML = "<i></i> 已自动保存";
-    if (roomId && sync) queueSharedSync();
+    elements.saveState.innerHTML = isDurableRoom()
+      ? "<i></i> 本机已保存 · 云端同步中"
+      : "<i></i> 已自动保存";
+    if (roomId && sync) {
+      if (isDurableRoom()) {
+        localEditsPending = true;
+        writeSyncMeta(true);
+      }
+      queueSharedSync();
+    }
+  }
+
+  function isDurableRoom() {
+    return roomMode === "secure" && Boolean(DURABLE_ROOM_API);
   }
 
   function parseRoomInput(value) {
@@ -152,6 +195,10 @@
     return Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
   }
 
+  function bytesToHex(bytes) {
+    return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
   async function deriveRoom(name, password) {
     const normalized = name.normalize("NFKC").trim().toLowerCase();
     const encoder = new TextEncoder();
@@ -161,11 +208,12 @@
       salt: encoder.encode(`silverash-tower-room-v2:${normalized}`),
       iterations: 250000,
       hash: "SHA-256",
-    }, source, 512);
+    }, source, 768);
     const bytes = new Uint8Array(bits);
-    const id = `secure-${[...bytes.subarray(0, 32)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-    const key = await crypto.subtle.importKey("raw", bytes.subarray(32), "AES-GCM", false, ["encrypt", "decrypt"]);
-    return { id, key, normalized };
+    const id = `secure-${bytesToHex(bytes.subarray(0, 32))}`;
+    const key = await crypto.subtle.importKey("raw", bytes.subarray(32, 64), "AES-GCM", false, ["encrypt", "decrypt"]);
+    const proof = bytesToHex(bytes.subarray(64, 96));
+    return { id, key, proof, normalized };
   }
 
   async function encryptRoomState(nextState) {
@@ -180,6 +228,234 @@
     const contents = JSON.parse(new TextDecoder().decode(decrypted));
     if (contents.format !== "silverash-room-v2" || contents.name !== roomNameKey) throw new Error("房间密码不匹配");
     return contents.state;
+  }
+
+  function copyState(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  async function roomRequest(path, { method = "GET", body, token = roomToken } = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(`${DURABLE_ROOM_API}${path}`, {
+        method,
+        mode: "cors",
+        cache: "no-store",
+        signal: controller.signal,
+        headers: {
+          ...(body ? { "Content-Type": "application/json" } : {}),
+          ...(token ? { "X-Room-Token": token } : {}),
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+      const data = response.status === 304 ? null : await response.json().catch(() => null);
+      return { response, data };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  function mergeStageChanges(base, local, remote) {
+    const merged = { ...defaultState(), ...copyState(remote) };
+    const preferredStages = [];
+    for (const field of ["assignments", "cleared", "notes"]) {
+      const baseMap = base?.[field] || {};
+      const localMap = local[field] || {};
+      const output = merged[field] ||= {};
+      for (const stageId of new Set([...Object.keys(baseMap), ...Object.keys(localMap)])) {
+        if (JSON.stringify(baseMap[stageId]) === JSON.stringify(localMap[stageId])) continue;
+        if (field === "assignments") preferredStages.push(stageId);
+        if (Object.prototype.hasOwnProperty.call(localMap, stageId)) output[stageId] = copyState(localMap[stageId]);
+        else delete output[stageId];
+      }
+    }
+    const seen = new Set();
+    for (const stageId of [...new Set([...preferredStages, ...Object.keys(merged.assignments)])]) {
+      merged.assignments[stageId] = (merged.assignments[stageId] || []).filter((item) => {
+        const operator = operatorById.get(item.operatorId);
+        if (!operator || operator.repeatable || operator.id === silverash?.id) return true;
+        if (seen.has(item.operatorId)) return false;
+        seen.add(item.operatorId);
+        return true;
+      });
+      if (!merged.assignments[stageId].length) delete merged.assignments[stageId];
+    }
+    merged.updatedAt = new Date().toISOString();
+    merged.revision = Math.max(Number(local.revision || 0), Number(remote.revision || 0)) + 1;
+    return merged;
+  }
+
+  function expireDurableSession() {
+    roomReady = false;
+    roomToken = null;
+    clearTimeout(pollTimer);
+    elements.copyRoomButton.disabled = true;
+    elements.syncRoomButton.disabled = true;
+    elements.saveState.innerHTML = "<i></i> 仅保存在本机";
+    lockBoard(false);
+    setCollabStatus(`房间「${roomName}」 · 请重新输入密码加入`, "error");
+  }
+
+  async function publishDurableState() {
+    if (!roomReady || !isDurableRoom() || !roomToken || syncInFlight || !localEditsPending) return;
+    syncInFlight = true;
+    const generation = roomGeneration;
+    try {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        if (generation !== roomGeneration) return;
+        const snapshot = copyState(state);
+        const base = copyState(roomBaseState || defaultState());
+        const payload = await encryptRoomState(snapshot);
+        const { response, data } = await roomRequest("/rooms/state", {
+          method: "PUT",
+          body: { id: roomId, payload, expectedVersion: roomVersion },
+        });
+        if (generation !== roomGeneration) return;
+        if (response.ok && Number.isInteger(data?.version)) {
+          durableRetryDelay = 3000;
+          roomVersion = data.version;
+          roomBaseState = snapshot;
+          localEditsPending = JSON.stringify(state) !== JSON.stringify(snapshot);
+          writeSyncMeta(localEditsPending);
+          setCollabStatus(`房间「${roomName}」 · 已保存到云端`, "ready");
+          elements.saveState.innerHTML = localEditsPending
+            ? "<i></i> 本机已保存 · 云端同步中"
+            : "<i></i> 已保存云端";
+          return;
+        }
+        if (response.status === 409 && data?.payload && Number.isInteger(data.version)) {
+          const remote = await decryptRoomState(data.payload);
+          if (generation !== roomGeneration) return;
+          state = mergeStageChanges(base, state, remote);
+          localStorage.setItem(activeStorageKey(), JSON.stringify(state));
+          roomBaseState = copyState(remote);
+          roomVersion = data.version;
+          writeSyncMeta(true);
+          renderAll();
+          continue;
+        }
+        if (response.status === 401 || response.status === 403) {
+          expireDurableSession();
+          throw new Error("房间验证已过期，请重新输入密码加入");
+        }
+        throw new Error(data?.error || "云端保存失败");
+      }
+      throw new Error("多人同时修改较频繁，稍后自动重试");
+    } catch (error) {
+      if (generation !== roomGeneration) return;
+      durableRetryDelay = Math.min(durableRetryDelay * 2, 60000);
+      if (roomReady) setCollabStatus(`房间「${roomName}」 · 尚未保存到云端`, "error");
+      elements.saveState.innerHTML = "<i></i> 仅保存在本机";
+      if (Date.now() - lastRoomErrorAt > 15000) {
+        showToast(error.message || "云端保存失败，记录暂存在本机");
+        lastRoomErrorAt = Date.now();
+      }
+    } finally {
+      if (generation === roomGeneration) syncInFlight = false;
+      if (generation === roomGeneration && roomReady && localEditsPending) {
+        clearTimeout(syncTimer);
+        syncTimer = setTimeout(publishDurableState, durableRetryDelay);
+      }
+    }
+  }
+
+  async function pollDurableRoom(generation) {
+    if (generation !== roomGeneration || !roomReady || !isDurableRoom() || syncInFlight || pollInFlight) return;
+    if (localEditsPending) return void publishDurableState();
+    pollInFlight = true;
+    try {
+      const { response, data } = await roomRequest(`/rooms/state?id=${encodeURIComponent(roomId)}&since=${roomVersion}`);
+      if (generation !== roomGeneration || localEditsPending) return;
+      if (response.status === 304) return;
+      if (response.status === 401 || response.status === 403) {
+        expireDurableSession();
+        throw new Error("房间验证已过期，请重新输入密码加入");
+      }
+      if (!response.ok || !data?.payload || !Number.isInteger(data.version)) throw new Error("读取云端记录失败");
+      const remote = await decryptRoomState(data.payload);
+      if (generation !== roomGeneration || localEditsPending) return;
+      roomVersion = data.version;
+      roomBaseState = copyState(remote);
+      applyRemoteState(remote);
+      writeSyncMeta(false);
+      setCollabStatus(`房间「${roomName}」 · 已连接云端`, "ready");
+      elements.saveState.innerHTML = "<i></i> 已保存云端";
+    } catch (error) {
+      if (generation !== roomGeneration) return;
+      if (roomReady) setCollabStatus(`房间「${roomName}」 · 云端暂时不可用`, "error");
+    } finally {
+      if (generation === roomGeneration) pollInFlight = false;
+    }
+  }
+
+  function scheduleDurablePoll(generation) {
+    clearTimeout(pollTimer);
+    if (generation !== roomGeneration || !roomReady || !isDurableRoom()) return;
+    pollTimer = setTimeout(async () => {
+      await pollDurableRoom(generation);
+      scheduleDurablePoll(generation);
+    }, document.hidden ? 120000 : 30000);
+  }
+
+  async function initDurableRoom(generation) {
+    setCollabStatus(`房间「${roomName}」 · 正在连接云端`, "pending");
+    try {
+      const name = roomName;
+      const id = roomId;
+      const proof = roomProof;
+      let result = await roomRequest(roomIntent === "create" ? "/rooms/create" : "/rooms/join", {
+        method: "POST",
+        token: null,
+        body: roomIntent === "create"
+          ? { id, name, proof, payload: await encryptRoomState(copyState(state)) }
+          : { id, proof },
+      });
+      if (generation !== roomGeneration) return;
+      if (roomIntent === "create" && result.response.status === 409) {
+        result = await roomRequest("/rooms/join", { method: "POST", token: null, body: { id, proof } });
+      }
+      if (generation !== roomGeneration) return;
+      if (!result.response.ok || !result.data?.token || !Number.isInteger(result.data.version)) {
+        if (result.response.status === 404) throw new Error("没有找到房间，请先让房主创建");
+        if (result.response.status === 401 || result.response.status === 403) throw new Error("房间不存在或密码不正确");
+        throw new Error(result.data?.error || "无法连接房间数据库");
+      }
+      roomToken = result.data.token;
+      roomVersion = result.data.version;
+      roomProof = null;
+      const cachedState = copyState(state);
+      const syncMeta = readSyncMeta();
+      if (result.data.payload) {
+        const remote = await decryptRoomState(result.data.payload);
+        if (generation !== roomGeneration) return;
+        roomBaseState = copyState(remote);
+        if (syncMeta?.dirty && syncMeta.baseState) {
+          state = mergeStageChanges(syncMeta.baseState, cachedState, remote);
+          localStorage.setItem(activeStorageKey(), JSON.stringify(state));
+          localEditsPending = true;
+          renderAll();
+        } else {
+          applyRemoteState(remote, { force: true });
+        }
+      }
+      roomBaseState ||= copyState(state);
+      writeSyncMeta(localEditsPending);
+      markRoomReady();
+      setCollabStatus(`房间「${roomName}」 · 已保存到云端`, "ready");
+      elements.saveState.innerHTML = localEditsPending
+        ? "<i></i> 本机已保存 · 云端同步中"
+        : "<i></i> 已保存云端";
+      scheduleDurablePoll(generation);
+      if (localEditsPending) queueSharedSync();
+      showToast(roomIntent === "create" ? "云端房间已创建" : "已载入云端房间记录");
+    } catch (error) {
+      if (generation !== roomGeneration) return;
+      roomProof = null;
+      setCollabStatus(`房间「${roomName}」 · ${error.message || "连接失败"}`, "error");
+      elements.saveState.innerHTML = "<i></i> 仅保存在本机";
+      showToast(error.message || "无法连接房间数据库");
+    }
   }
 
   async function publishCurrentState() {
@@ -202,7 +478,14 @@
   }
 
   function queueSharedSync() {
-    if (!roomReady || !sharedMap || remoteApplying) return;
+    if (!roomReady || remoteApplying) return;
+    if (isDurableRoom()) {
+      clearTimeout(syncTimer);
+      setCollabStatus(`房间「${roomName}」 · 正在保存云端`, "pending");
+      syncTimer = setTimeout(publishDurableState, 250);
+      return;
+    }
+    if (!sharedMap) return;
     clearTimeout(syncTimer);
     setCollabStatus(`房间「${roomName}」 · 正在同步`, "pending");
     syncTimer = setTimeout(publishCurrentState, 120);
@@ -224,6 +507,7 @@
     roomReady = true;
     lockBoard(false);
     elements.copyRoomButton.disabled = false;
+    elements.syncRoomButton.disabled = !isDurableRoom();
     setCollabStatus(`房间「${roomName}」 · 已连接`, "ready");
   }
 
@@ -287,21 +571,43 @@
     roomGeneration += 1;
     syncSequence += 1;
     clearTimeout(syncTimer);
+    clearTimeout(pollTimer);
     if (sharedProvider) sharedProvider.destroy();
     if (sharedDoc) sharedDoc.destroy();
     sharedDoc = null;
     sharedMap = null;
     sharedProvider = null;
+    roomToken = null;
+    roomVersion = 0;
+    roomBaseState = null;
+    localEditsPending = false;
+    durableRetryDelay = 3000;
+    syncInFlight = false;
+    pollInFlight = false;
     roomReady = false;
     elements.copyRoomButton.disabled = true;
     elements.leaveRoomButton.hidden = !roomId;
+    elements.syncRoomButton.hidden = !roomId || !isDurableRoom();
+    elements.syncRoomButton.disabled = true;
+    if (elements.roomHint) {
+      elements.roomHint.textContent = roomMode === "legacy"
+        ? "这是旧版临时房间：没有密码，也没有云端长期保存。请导出记录备份。"
+        : DURABLE_ROOM_API
+          ? "同名同密码可加入；邀请链接不含密码。队友更新约 30 秒内显示，可点“立即同步”。记录保存在云端，也建议定期导出备份。"
+          : "队友输入相同房间名和密码即可加入；邀请链接不含密码，请单独告知。协作记录建议定期导出备份。";
+    }
     lockBoard(Boolean(roomId));
     if (!roomId) {
+      elements.saveState.innerHTML = "<i></i> 已自动保存";
       setCollabStatus(elements.roomInput.value ? "输入密码即可加入该房间" : "本机记录 · 还没有共享");
       return;
     }
+    elements.saveState.innerHTML = isDurableRoom()
+      ? "<i></i> 正在连接云端"
+      : "<i></i> 已自动保存";
     elements.roomInput.value = roomName;
-    void initSharedRoom(roomGeneration);
+    if (isDurableRoom()) void initDurableRoom(roomGeneration);
+    else void initSharedRoom(roomGeneration);
   }
 
   async function createRoom() {
@@ -317,9 +623,13 @@
       roomName = name;
       roomNameKey = credentials.normalized;
       roomKey = credentials.key;
+      roomProof = credentials.proof;
       roomMode = "secure";
       roomIntent = "create";
-      state = { ...defaultState(), ...currentState };
+      const roomCacheKey = `${STORAGE_KEY}:room:${roomId}`;
+      state = localStorage.getItem(roomCacheKey)
+        ? loadState(roomCacheKey)
+        : { ...defaultState(), ...currentState };
       history = [];
       elements.roomPasswordInput.value = "";
       window.history.replaceState({}, "", roomUrl());
@@ -344,6 +654,7 @@
       roomName = parsed.name;
       roomNameKey = credentials?.normalized || "";
       roomKey = credentials?.key || null;
+      roomProof = credentials?.proof || null;
       roomMode = parsed.mode;
       roomIntent = "join";
       state = loadState(activeStorageKey(), parsed.mode === "legacy");
@@ -363,6 +674,8 @@
     roomName = "";
     roomNameKey = "";
     roomKey = null;
+    roomProof = null;
+    roomToken = null;
     roomMode = "";
     roomIntent = "";
     state = loadState();
@@ -695,11 +1008,23 @@
   elements.createRoomButton.addEventListener("click", createRoom);
   elements.joinRoomButton.addEventListener("click", joinRoom);
   elements.leaveRoomButton.addEventListener("click", leaveRoom);
+  elements.syncRoomButton.addEventListener("click", async () => {
+    if (!roomReady || !isDurableRoom()) return;
+    if (localEditsPending) await publishDurableState();
+    else await pollDurableRoom(roomGeneration);
+    if (roomReady) showToast(localEditsPending ? "仍有记录等待云端保存" : "已检查云端最新记录");
+  });
   elements.roomInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") joinRoom();
   });
   elements.roomPasswordInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") joinRoom();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!roomReady || !isDurableRoom()) return;
+    const generation = roomGeneration;
+    if (!document.hidden) void pollDurableRoom(generation);
+    scheduleDurablePoll(generation);
   });
   elements.copyRoomButton.addEventListener("click", async () => {
     if (!roomId) return;
