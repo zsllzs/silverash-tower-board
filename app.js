@@ -92,6 +92,7 @@
     copyRoomButton: document.querySelector("#copyRoomButton"),
     leaveRoomButton: document.querySelector("#leaveRoomButton"),
     syncRoomButton: document.querySelector("#syncRoomButton"),
+    restoreLegacyButton: document.querySelector("#restoreLegacyButton"),
     roomInput: document.querySelector("#roomInput"),
     roomPasswordInput: document.querySelector("#roomPasswordInput"),
     memberNameInput: document.querySelector("#memberNameInput"),
@@ -242,6 +243,12 @@
 
   function copyState(value) {
     return JSON.parse(JSON.stringify(value));
+  }
+
+  function hasProgress(value) {
+    return Boolean(Object.keys(value?.assignments || {}).length
+      || Object.keys(value?.cleared || {}).length
+      || Object.keys(value?.notes || {}).length);
   }
 
   function memberName() {
@@ -487,30 +494,29 @@
       const name = roomName;
       const id = roomId;
       const proof = roomProof;
+      let createdOnJoin = false;
       let result = await roomRequest(roomIntent === "create" ? "/rooms/create" : "/rooms/join", {
         method: "POST",
         token: null,
         body: roomIntent === "create"
           ? { id, name, proof, nickname: memberName(), payload: await encryptRoomState(copyState(state)) }
-          : { id, proof, nickname: memberName() },
+          : { id, name, proof, nickname: memberName() },
       });
       if (generation !== roomGeneration) return;
-      if (roomIntent === "create" && result.response.status === 409) {
-        result = await roomRequest("/rooms/join", { method: "POST", token: null, body: { id, proof, nickname: memberName() } });
+      if (roomIntent === "join" && result.response.status === 404) {
+        result = await roomRequest("/rooms/create", {
+          method: "POST", token: null,
+          body: { id, name, proof, nickname: memberName(), payload: await encryptRoomState(copyState(state)) },
+        });
+        createdOnJoin = result.response.status === 201;
+      }
+      if (result.response.status === 409) {
+        result = await roomRequest("/rooms/join", { method: "POST", token: null, body: { id, name, proof, nickname: memberName() } });
       }
       if (generation !== roomGeneration) return;
       if (!result.response.ok || !result.data?.token || !Number.isInteger(result.data.version)) {
-        if ((result.response.status === 404 || result.response.status === 401) && roomIntent === "join") {
-          roomMode = "secure-legacy";
-          roomProof = null;
-          elements.syncRoomButton.hidden = true;
-          elements.roomHint.textContent = "这是旧版密码房间，仍使用临时协作服务。进入后可点击“创建房间”，用相同名称和密码把当前记录保存到云端。";
-          setCollabStatus(`房间「${roomName}」 · 正在查找旧版房间`, "pending");
-          void initSharedRoom(generation);
-          return;
-        }
         if (result.response.status === 404) throw new Error("没有找到房间，请先创建");
-        if (result.response.status === 401 || result.response.status === 403) throw new Error("房间不存在或密码不正确");
+        if (result.response.status === 401 || result.response.status === 403) throw new Error("房间已存在，请核对房间名和密码");
         throw new Error(result.data?.error || "无法连接房间数据库");
       }
       roomToken = result.data.token;
@@ -518,6 +524,7 @@
       roomProof = null;
       const cachedState = copyState(state);
       const syncMeta = readSyncMeta();
+      const migrationKey = `${STORAGE_KEY}:cloud-joined:${id}`;
       if (result.data.payload) {
         const remote = await decryptRoomState(result.data.payload);
         if (generation !== roomGeneration) return;
@@ -527,10 +534,21 @@
           localStorage.setItem(activeStorageKey(), JSON.stringify(state));
           localEditsPending = true;
           renderAll();
+        } else if (!createdOnJoin && !syncMeta && !localStorage.getItem(migrationKey)
+            && hasProgress(cachedState) && !hasProgress(remote)) {
+          state = cachedState;
+          localEditsPending = true;
+          renderAll();
         } else {
+          if (!syncMeta && !localStorage.getItem(migrationKey) && hasProgress(cachedState)
+              && JSON.stringify(cachedState) !== JSON.stringify(remote)) {
+            localStorage.setItem(`${STORAGE_KEY}:legacy-backup:${id}`, JSON.stringify(cachedState));
+          }
           applyRemoteState(remote, { force: true });
         }
       }
+      localStorage.setItem(migrationKey, "1");
+      elements.restoreLegacyButton.hidden = !localStorage.getItem(`${STORAGE_KEY}:legacy-backup:${id}`);
       roomBaseState ||= copyState(state);
       writeSyncMeta(localEditsPending);
       markRoomReady();
@@ -542,7 +560,7 @@
         : "<i></i> 已保存云端";
       scheduleDurablePoll(generation);
       if (localEditsPending) queueSharedSync();
-      showToast(roomIntent === "create" ? "云端房间已创建" : "已载入云端房间记录");
+      showToast(createdOnJoin ? "云端房间已自动建立，可随时加入" : roomIntent === "create" ? "云端房间已创建" : "已载入云端房间记录");
     } catch (error) {
       if (generation !== roomGeneration) return;
       roomProof = null;
@@ -684,6 +702,7 @@
     elements.copyRoomButton.disabled = true;
     elements.leaveRoomButton.hidden = !roomId;
     elements.syncRoomButton.hidden = !roomId || !isDurableRoom();
+    elements.restoreLegacyButton.hidden = true;
     elements.syncRoomButton.disabled = true;
     if (elements.roomHint) {
       elements.roomHint.textContent = roomMode === "secure-legacy"
@@ -691,7 +710,7 @@
         : roomMode === "legacy"
         ? "这是旧版临时房间：没有密码，也没有云端长期保存。请导出记录备份。"
         : DURABLE_ROOM_API
-          ? "同名同密码可加入；邀请链接不含密码。队友更新约 30 秒内显示，可点“立即同步”。记录保存在云端，也建议定期导出备份。"
+          ? "同名同密码随时可加入，房主无需在线；房间不存在时自动建立。队友更新约 30 秒内显示，也可点“立即同步”。"
           : "队友输入相同房间名和密码即可加入；邀请链接不含密码，请单独告知。协作记录建议定期导出备份。";
     }
     lockBoard(Boolean(roomId));
@@ -1112,6 +1131,18 @@
     else await pollDurableRoom(roomGeneration);
     if (roomReady) void refreshOverview(roomGeneration);
     if (roomReady) showToast(localEditsPending ? "仍有记录等待云端保存" : "已检查云端最新记录");
+  });
+  elements.restoreLegacyButton.addEventListener("click", () => {
+    if (!roomReady || !isDurableRoom()) return;
+    const backupKey = `${STORAGE_KEY}:legacy-backup:${roomId}`;
+    const old = JSON.parse(localStorage.getItem(backupKey) || "null");
+    if (!old?.assignments) return;
+    if (!window.confirm("将旧本机记录合并进当前云端房间？同一关有冲突时会以旧本机记录为准。")) return;
+    snapshot();
+    state = mergeStageChanges(defaultState(), old, state);
+    localStorage.removeItem(backupKey);
+    elements.restoreLegacyButton.hidden = true;
+    commit("旧本机记录已合并，正在保存到云端");
   });
   elements.roomInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") joinRoom();
